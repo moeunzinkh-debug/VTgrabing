@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PART_SIZE_BYTES, toChunkedStream, writeStreamToR2 } from '../src/providers/storage/r2';
+import { MIN_PART_SIZE_BYTES, PART_SIZE_BYTES, partSizeFor, toChunkedStream, writeStreamToR2 } from '../src/providers/storage/r2';
 import { testEnv } from './helpers';
 
 function payload(size: number, seed = 7): Uint8Array {
@@ -68,6 +68,38 @@ describe('writeStreamToR2', () => {
       }
     }
     expect(mismatch).toBe(-1);
+  });
+
+  it('clamps the part size to what R2 allows', () => {
+    expect(partSizeFor()).toBe(PART_SIZE_BYTES);
+    expect(partSizeFor(Number.NaN)).toBe(PART_SIZE_BYTES);
+    expect(partSizeFor(0)).toBe(PART_SIZE_BYTES);
+    // R2 rejects any part but the last one below 5 MiB.
+    expect(partSizeFor(1024)).toBe(MIN_PART_SIZE_BYTES);
+    expect(partSizeFor(6 * 1024 * 1024)).toBe(6 * 1024 * 1024);
+    expect(partSizeFor(1024 * 1024 * 1024)).toBe(1024 * 1024 * 1024);
+  });
+
+  it('honours a caller-supplied part size', async () => {
+    // The download path passes GRAB_CHUNK_BYTES through, so one chunk is one part:
+    // 12 MiB with the 5 MiB minimum makes three parts, not two 8 MiB ones.
+    const size = 12 * 1024 * 1024;
+    const bytes = payload(size, 5);
+    const result = await writeStreamToR2(
+      testEnv.FILES,
+      'unit/configured-parts.bin',
+      toChunkedStream(bytes, 1024 * 1024),
+      { contentType: 'video/mp4', partSizeBytes: 1 }, // below the floor on purpose
+    );
+
+    expect(result.multipart).toBe(true);
+    expect(result.parts).toBe(3);
+    expect(result.size).toBe(size);
+
+    const roundTrip = new Uint8Array(await (await testEnv.FILES.get('unit/configured-parts.bin'))!.arrayBuffer());
+    expect(roundTrip.byteLength).toBe(size);
+    expect(roundTrip[0]).toBe(bytes[0]);
+    expect(roundTrip[size - 1]).toBe(bytes[size - 1]);
   });
 
   it('handles an empty stream', async () => {

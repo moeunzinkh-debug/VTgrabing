@@ -2,10 +2,11 @@ import { nowIso, Repository } from '../db/repository';
 import type { Env } from '../env';
 import { maxAttempts, num } from '../env';
 import { episodeLabel } from '../core/ids';
+import { grabConfig } from '../grab/config';
 import { resolveDownloadProvider } from '../providers/download/registry';
 import { fetchRemoteObject } from '../providers/download/remote';
 import type { DownloadRequest } from '../providers/download/types';
-import { writeStreamToR2 } from '../providers/storage/r2';
+import { PART_SIZE_BYTES, writeStreamToR2 } from '../providers/storage/r2';
 import type {
   EpisodeRecord,
   FileRecord,
@@ -115,6 +116,10 @@ export async function completeJobItemWithStream(
 
   const written = await writeStreamToR2(env.FILES, item.objectKey, input.stream, {
     contentType: input.contentType,
+    // GRAB_CHUNK_BYTES is documented as "one chunk = one R2 part", so follow it -
+    // but never buffer more than the default part size, because an isolate has a
+    // 128 MB memory ceiling and a whole part is held in memory at once.
+    partSizeBytes: Math.min(grabConfig(env).chunkBytes, PART_SIZE_BYTES),
     customMetadata: {
       jobId: item.jobId,
       jobItemId: item.id,
