@@ -156,6 +156,10 @@ npm run build
 npx wrangler deploy
 ```
 
+`npm run deploy` does all of step 5 **plus** the pre-deploy check
+(`scripts/check-deploy-config.mjs`), which fails with an actionable message while
+the D1 `database_id` is still the all-zero template value.
+
 First deploy only: after the Worker is live, set the public origin and the
 callback URL so the external download service can reach the Worker:
 
@@ -168,6 +172,103 @@ npx wrangler versions secret put DOWNLOAD_CALLBACK_URL  # same value, or your cu
 > `wrangler.jsonc` (empty by default). A secret with the same name overrides the
 > var at runtime, so the commands above are the recommended way to set them.
 > Alternatively edit the `vars` block and redeploy.
+
+### Deploy from the Cloudflare dashboard (Workers Builds / Git integration)
+
+`Workers & Pages → vtgrabing → Settings → Build` - the values that matter:
+
+| Setting          | Value             | Why                                                                 |
+| ---------------- | ----------------- | ------------------------------------------------------------------- |
+| Git branch       | `main`            | production branch                                                   |
+| Build command    | `npm run build`   | creates `./dist` (git-ignored) - **required**, see below            |
+| Deploy command   | `npm run deploy`  | pre-deploy check + typecheck + Vite build + `wrangler deploy` (`npx wrangler deploy` also works, it just skips the check) |
+| Root directory   | `/`               | `wrangler.jsonc` sits at the top of the repository                  |
+| Build variables  | none              | runtime vars/secrets belong in `Settings → Variables & Secrets`     |
+
+**There is no "folder" / "build output directory" picker in Workers Builds** -
+that field only exists in Cloudflare *Pages*. For a Worker the folder that gets
+uploaded is declared inside `wrangler.jsonc`:
+
+```jsonc
+"assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": true }
+```
+
+and the **build command** is what creates that folder, because `dist/` is
+git-ignored and therefore absent from a fresh clone. `Root directory = /` is
+correct: the Worker is not in a sub-folder of this repository.
+
+Save the settings, then push a commit (or press **Retry build**) - Cloudflare
+clones the repo, runs the build command, then the deploy command. This only goes
+green once the account resources exist (see the next section).
+
+### Create the three resources the Worker binds to
+
+`wrangler.jsonc` binds a D1 database, an R2 bucket and a Queue. Cloudflare only
+needs their **names** - the single value that has to reach the repository is the
+D1 `database_id`.
+
+**In the Cloudflare dashboard (no CLI):**
+
+| Resource | Where                                        | Create          |
+| -------- | -------------------------------------------- | --------------- |
+| D1       | `Storage & Databases → D1 SQL Database → Create` | `vtgrab-db`  |
+| R2       | `R2 → Create bucket`                         | `vtgrab-files`  |
+| Queues   | `Workers & Pages → Queues → Create queue`    | `vtgrab-jobs`   |
+
+Then open the D1 database, copy its **database ID** (a UUID such as
+`1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d`) and paste it over the all-zero value in
+`wrangler.jsonc`:
+
+```jsonc
+"d1_databases": [
+  { "binding": "DB", "database_name": "vtgrab-db",
+    "database_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" }
+]
+```
+
+Commit that change - the next Workers Build picks it up automatically.
+
+**Or let the script do it** (needs `npx wrangler login` once, on your machine):
+
+```bash
+npm run cf:provision   # creates all three + writes the database_id into wrangler.jsonc
+npm run db:migrate     # apply migrations to the remote database
+```
+
+Either way, verify before pushing:
+
+```bash
+npm run cf:check       # fails while the database_id is still the template value
+```
+
+### Build token permissions
+
+Workers Builds creates its own API token from the **Edit Cloudflare Workers**
+template, which does **not** include D1 or Queues. If the deploy fails with an
+authentication/authorization error instead of `Invalid database UUID`, create
+your own token (`My Profile → API Tokens → Create Token → Custom token`) with:
+
+```
+Account | Workers Scripts    | Edit
+Account | Workers R2 Storage | Edit
+Account | D1                 | Edit
+Account | Queues             | Edit
+Zone    | Workers Routes     | Edit
+Account | Account Settings   | Read
+User    | User Details       | Read
+User    | User Memberships   | Read
+```
+
+...scoped to this account, and select it in `Settings → Build → Build token`.
+
+### Reading a failed Workers Build
+
+| Log line                                                                | Cause                                              | Fix                                                       |
+| ----------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------- |
+| `Invalid database UUID (00000000-…) [code: 80000222]`                    | `database_id` is still the template value           | `npx wrangler d1 create vtgrab-db`, paste the real id     |
+| `The directory specified by the "assets.directory" field … does not exist` | `dist/` was never built (git-ignored)             | set the build command to `npm run build`                   |
+| `R2 bucket 'vtgrab-files' not found [code: 10085]`                       | the bucket does not exist                           | `npx wrangler r2 bucket create vtgrab-files`               |
+| queue not found                                                          | the queue does not exist                            | `npx wrangler queues create vtgrab-jobs`                   |
 
 Verify:
 
@@ -443,6 +544,24 @@ npm test
 npm run build
 npm run deploy   # build + wrangler deploy
 ```
+
+**ចំណុចសម្រាប់ deploy តាម Cloudflare dashboard (Workers Builds):**
+
+* ក្នុង `Settings → Build` មិនមាន ចន្លោះ «ជ្រើស folder / build output directory» ទេ
+  (ចន្លោះនោះមានតែក្នុង Cloudflare **Pages** ប៉ុណ្ណោះ)។ សម្រាប់ Worker វាយ៉ាង
+  ដែលត្រូវ upload កំណត់ក្នុង `wrangler.jsonc` ថា `assets.directory: "./dist"`
+  ហើយ **build command** ជាអ្នកបង្កើត folder នោះ (ព្រោះ `dist/` មិនមានក្នុង git)។
+* ដូច្នេះ៖ Build command = `npm run build`, Deploy command = `npm run deploy`,
+  Root directory = `/` (ព្រោះ `wrangler.jsonc` នៅឫសរៀងខាងលើរបស់ repo)។
+* ត្រូវបង្កើត resource ទាំង៣ ក្នុង Cloudflare dashboard៖
+  `Storage & Databases → D1 → Create` ឈ្មោះ `vtgrab-db`,
+  `R2 → Create bucket` ឈ្មោះ `vtgrab-files`,
+  `Queues → Create queue` ឈ្មោះ `vtgrab-jobs`។
+  រួចចម្លង **database ID** របស់ `vtgrab-db` (UUID) ដាក់ជំនួស `00000000-…`
+  ក្នុង `wrangler.jsonc` ហើយ commit — Cloudflare build ខាងប្រាកដនឹងដំណើរការ។
+* ឬឲ្យ script ធ្វើឲ្យ៖ `npx wrangler login` ម្តង រួច `npm run cf:provision`
+  (បង្កើតទាំង៣ + សរសេរ database_id ចូល `wrangler.jsonc`) ហើយ
+  `npm run db:migrate`។ ពិនិត្យមុន push៖ `npm run cf:check`។
 
 ---
 
