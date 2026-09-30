@@ -11,7 +11,13 @@ import {
   parseOrThrow,
 } from '../core/validate';
 import type { Env } from '../env';
-import { defaultConcurrency, maxAttempts, mocksEnabled, num } from '../env';
+import {
+  defaultConcurrency,
+  fileUrlTtlSeconds,
+  maxAttempts,
+  mocksEnabled,
+  queuePushBatchSize,
+} from '../env';
 import { resolveExtractor, describeExtractors } from '../providers/extract/registry';
 import { describeDownloadProviders, resolveDownloadProvider } from '../providers/download/registry';
 import { JobService } from '../jobs/service';
@@ -62,7 +68,7 @@ app.get('/api/sources', (context) => {
       defaultQuality: env.DEFAULT_QUALITY,
       defaultContainer: env.DEFAULT_CONTAINER,
       defaultConcurrency: defaultConcurrency(env),
-      queuePushBatchSize: num(env, 'QUEUE_PUSH_BATCH_SIZE', 100),
+      queuePushBatchSize: queuePushBatchSize(env),
     },
   });
 });
@@ -232,7 +238,7 @@ app.get('/api/files/:id/content', async (context) => {
     'content-type': object.httpMetadata?.contentType ?? file.contentType,
     'content-length': String(range ? range.length : file.size),
     'accept-ranges': 'bytes',
-    'cache-control': 'private, max-age=60',
+    'cache-control': `private, max-age=${fileUrlTtlSeconds(env)}`,
     'content-disposition': `attachment; filename="${file.filename.replace(/"/g, '')}"`,
   });
   if (object.etag) headers.set('etag', object.etag);

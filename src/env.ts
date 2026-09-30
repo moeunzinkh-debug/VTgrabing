@@ -75,3 +75,8 @@ export function queuePushBatchSize(env: Env): number {
 export function defaultConcurrency(env: Env): number {
   return Math.max(1, Math.min(20, num(env, 'DEFAULT_CONCURRENCY', 4)));
 }
+
+/** Seconds a stored object may be cached downstream (`/api/files/:id/content`). */
+export function fileUrlTtlSeconds(env: Env): number {
+  return Math.max(0, num(env, 'FILE_URL_TTL_SECONDS', 3600));
+}
