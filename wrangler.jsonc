@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "vtgrab",
+  "name": "vtgrabing",
   "main": "src/index.ts",
   "compatibility_date": "2025-09-25",
   "compatibility_flags": ["nodejs_compat"],
@@ -25,6 +25,9 @@
     {
       "binding": "DB",
       "database_name": "vtgrab-db",
+      // Replace this template value with the real ID from `wrangler d1 list`
+      // before deploying. Cloudflare Workers Builds cannot deploy a D1 binding
+      // that points to this all-zero placeholder.
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }

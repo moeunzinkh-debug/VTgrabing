@@ -134,12 +134,14 @@ npm run build
 npm install
 npx wrangler login
 
-# 1. create the bindings
-npx wrangler d1 create vtgrab-db          # copy the printed database_id
-npx wrangler r2 bucket create vtgrab-files
-npx wrangler queues create vtgrab-jobs
+# 1. create the bindings (if they already exist, list them instead of recreating)
+npx wrangler d1 list                      # find vtgrab-db and copy its database_id
+npx wrangler d1 create vtgrab-db          # only if vtgrab-db does not exist
+npx wrangler r2 bucket create vtgrab-files # only if the bucket does not exist
+npx wrangler queues create vtgrab-jobs    # only if the queue does not exist
 
-# 2. paste the D1 database_id into wrangler.jsonc (d1_databases[0].database_id)
+# 2. paste the real D1 database_id into wrangler.jsonc (d1_databases[0].database_id)
+#    The all-zero ID in the checked-in config is a template placeholder; deploy will fail until replaced.
 
 # 3. apply the schema to the remote database
 npx wrangler d1 migrations apply vtgrab-db --remote
@@ -158,7 +160,7 @@ First deploy only: after the Worker is live, set the public origin and the
 callback URL so the external download service can reach the Worker:
 
 ```bash
-npx wrangler versions secret put PUBLIC_BASE_URL        # https://vtgrab.<subdomain>.workers.dev
+npx wrangler versions secret put PUBLIC_BASE_URL        # https://vtgrabing.<subdomain>.workers.dev
 npx wrangler versions secret put DOWNLOAD_CALLBACK_URL  # same value, or your custom domain
 ```
 
