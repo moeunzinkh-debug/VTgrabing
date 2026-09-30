@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.client.json",
+  "compilerOptions": {
+    // The DOM test harness needs `node:fs` / `node:path` to read index.html.
+    "types": ["node"]
+  },
+  "include": [
+    "test-frontend/**/*.ts",
+    "src/frontend/**/*.ts",
+    "src/shared/**/*.ts",
+    "src/core/selection.ts",
+    "src/core/ids.ts"
+  ]
+}

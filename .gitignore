@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output (Vite bundles the frontend into ./dist for wrangler assets)
+dist/
+
+# Wrangler local state + dry-run output
+.wrangler/
+.build-check/
+.mf/
+
+# Secrets - NEVER commit. Use `wrangler secret put` / .dev.vars locally.
+.dev.vars
+.env
+.env.*
+!.env.example
+
+# Logs & editor noise
+*.log
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/
+*.swp
+coverage/

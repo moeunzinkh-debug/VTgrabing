@@ -1,0 +1,45 @@
+{
+  "name": "vtgrab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "VTGrab - series/episode analyzer and download job orchestrator running on Cloudflare Workers (D1 + R2 + Queues).",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "predev": "npm run build:client && wrangler d1 migrations apply vtgrab-db --local",
+    "dev": "wrangler dev --ip 0.0.0.0 --port 8787",
+    "dev:client": "vite",
+    "dev:remote": "wrangler dev --remote --ip 0.0.0.0 --port 8787",
+    "build": "npm run typecheck && npm run build:client && wrangler deploy --dry-run --outdir=.wrangler/build-check",
+    "build:client": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.frontend-test.json --noEmit",
+    "test": "vitest run && vitest run --config vitest.frontend.config.ts",
+    "test:watch": "vitest",
+    "deploy": "npm run build && wrangler deploy",
+    "db:create": "wrangler d1 create vtgrab-db",
+    "db:migrate:local": "wrangler d1 migrations apply vtgrab-db --local",
+    "db:migrate": "wrangler d1 migrations apply vtgrab-db --remote",
+    "db:list": "wrangler d1 execute vtgrab-db --remote --command \"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;\"",
+    "r2:create": "wrangler r2 bucket create vtgrab-files",
+    "queue:create": "wrangler queues create vtgrab-jobs",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "hono": "^4.13.11",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^4.20250930.0",
+    "@types/node": "^22.10.2",
+    "@vitest/runner": "^4.1.0",
+    "@vitest/snapshot": "^4.1.0",
+    "jsdom": "^30.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.144.0"
+  }
+}
