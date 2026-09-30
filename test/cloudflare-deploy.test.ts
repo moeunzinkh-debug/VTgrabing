@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { Repository } from '../src/db/repository';
 import type { Env } from '../src/env';
+import { FallbackR2Bucket, ensureD1Schema } from '../src/runtime/fallbacks';
 import type { EpisodeRecord, FileRecord, JobDetail, SeriesRecord } from '../src/shared/types';
-import { waitFor } from './helpers';
+import { testEnv, waitFor } from './helpers';
 
 function zeroBindingEnv(): Env {
   return {
@@ -126,5 +128,38 @@ describe('Zero-binding Cloudflare deployment (built-in Edge fallbacks)', () => {
       const detail = (await response.json()) as JobDetail;
       return detail.job.status === 'completed';
     });
+
+    // 6. Scheduled cron maintenance runs cleanly in zero-binding mode
+    const { ctx: schedCtx } = makeCtx();
+    await worker.scheduled!(
+      { cron: '*/5 * * * *', scheduledTime: Date.now(), noRetry() {} } as ScheduledController,
+      env,
+      schedCtx,
+    );
+  });
+
+  it('supports multipart upload assembly and abort on FallbackR2Bucket', async () => {
+    const bucket = new FallbackR2Bucket();
+    const upload = await bucket.createMultipartUpload('videos/part-test.mp4', {
+      httpMetadata: { contentType: 'video/mp4' },
+    });
+    const part1 = await upload.uploadPart(1, new TextEncoder().encode('hello '));
+    const part2 = await upload.uploadPart(2, new TextEncoder().encode('world'));
+    const completed = await upload.complete([part1, part2]);
+    expect(completed.size).toBe(11);
+
+    const obj = await bucket.get('videos/part-test.mp4');
+    expect(obj).not.toBeNull();
+    expect(await obj!.text()).toBe('hello world');
+
+    const suffixed = await bucket.get('videos/part-test.mp4', { range: { suffix: 5 } });
+    expect(await suffixed!.text()).toBe('world');
+  });
+
+  it('auto-initializes D1 schema via ensureD1Schema on real D1 bindings', async () => {
+    await ensureD1Schema(testEnv.DB);
+    const repo = new Repository(testEnv);
+    const list = await repo.listSeries({ limit: 5, offset: 0 });
+    expect(Array.isArray(list.items)).toBe(true);
   });
 });
