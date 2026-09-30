@@ -23,3 +23,6 @@ npm-debug.log*
 .vscode/
 *.swp
 coverage/
+
+# Local experimental SSSTik downloads (never commit third-party media)
+downloads/
