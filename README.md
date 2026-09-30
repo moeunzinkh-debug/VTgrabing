@@ -290,6 +290,41 @@ as extractor `tiktok`, ahead of the generic `http-sniff`.
 > fixtures, but if a real page stops yielding a playlist the result degrades to the
 > single-episode listing above rather than to wrong data.
 
+### Experimental SSSTik single-video probe (not part of VTGrab jobs)
+
+Third-party clients from [2023](https://github.com/krypton-byte/tiktok-downloader/blob/master/tiktok_downloader/ssstik.py)
+and [2024](https://github.com/ibnusyawall/ssstik.io-scrapper/blob/main/index.js) describe a
+public form flow: `GET https://ssstik.io/` → read `s_tt` / `tt` page token →
+`POST https://ssstik.io/abc?url=dl` with form fields `id` (TikTok URL), `locale`,
+`tt` → read `a.without_watermark` / `a.music` links in the HTML response. This
+is **not an official/stable API**, and it reveals nothing about SSSTik's internal
+TikTok extraction method. The current site may have changed.
+
+To try from a machine with normal outbound HTTPS (replace the URL with a real,
+public TikTok post you have permission to download):
+
+```bash
+npm run probe:ssstik -- 'https://www.tiktok.com/@account/video/1234567890123456789'     # print result links only
+npm run download:ssstik -- 'https://www.tiktok.com/@account/video/1234567890123456789'  # save ONE MP4 under downloads/
+npm run test:probe:ssstik  # offline fixture tests; no remote calls
+```
+
+The probe accepts only TikTok HTTPS video/photo/short links, makes one GET and
+one POST to SSSTik, keeps first-party cookies only for that request, reads at most
+1 MiB of HTML per response, and prints only the named result links by default.
+`download:ssstik` additionally follows a video result through a small allow-list
+of SSSTik/TikTok media hosts, rejects HTML/non-MP4, limits the response to 256 MiB,
+and streams **one** MP4 into a temporary file before renaming it under git-ignored
+`downloads/`. A protected, unavailable, expired, or unrecognized result fails
+without leaving a partial file. It does not use accounts, solve captcha or bypass
+access controls. It does **not** infer other episodes: SSSTik's form resolves one
+TikTok post URL at a time. To download a whole series, first obtain legitimate URLs
+for every episode and verify them separately; the single-video probe is deliberately
+**not** registered as a VTGrab source or job provider until a real response and
+media rights can be verified. The sandbox's HTTPS connection to SSSTik closes
+during TLS handshake, so only the offline fixture tests have been verified here,
+not a live end-to-end download. Follow the service's terms.
+
 ---
 
 ## Deployment to Cloudflare
