@@ -4,6 +4,7 @@ import { runMaintenance } from './jobs/orchestrator';
 import { handleQueue } from './queue/consumer';
 import type { QueueMessage } from './queue/messages';
 import { app } from './routes/api';
+import { ensureRuntimeEnv } from './runtime/fallbacks';
 
 /**
  * Serve the Vite single page app from the assets binding.
@@ -30,19 +31,22 @@ async function serveFrontend(request: Request, env: Env): Promise<Response> {
 
 const worker: ExportedHandler<Env, QueueMessage> = {
   async fetch(request, env, ctx) {
+    const runtimeEnv = ensureRuntimeEnv(env, ctx, request.url);
     const { pathname } = new URL(request.url);
     if (pathname.startsWith('/api/')) {
-      return app.fetch(request, env, ctx);
+      return app.fetch(request, runtimeEnv, ctx);
     }
-    return serveFrontend(request, env);
+    return serveFrontend(request, runtimeEnv);
   },
 
-  async queue(batch, env) {
-    await handleQueue(batch, env);
+  async queue(batch, env, ctx) {
+    const runtimeEnv = ensureRuntimeEnv(env, ctx);
+    await handleQueue(batch, runtimeEnv);
   },
 
-  async scheduled(_event, env) {
-    const result = await runMaintenance(env, new Repository(env));
+  async scheduled(_event, env, ctx) {
+    const runtimeEnv = ensureRuntimeEnv(env, ctx);
+    const result = await runMaintenance(runtimeEnv, new Repository(runtimeEnv));
     console.log(
       `[vtgrab] maintenance: polled=${result.polled} completed=${result.completed} failed=${result.failed}`,
     );

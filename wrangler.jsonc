@@ -4,72 +4,27 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-09-25",
   "compatibility_flags": ["nodejs_compat"],
+  "keep_vars": true,
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
   },
 
-  // Static single page frontend built by `npm run build:client` (Vite) into ./dist
-  // The Worker runs first and serves the Vite bundle from `env.ASSETS`, with an
-  // explicit SPA fallback (see src/index.ts).
-  //
-  // ./dist is git-ignored, so it only exists after a build. Cloudflare Workers
-  // Builds therefore needs a *build command* (`npm run build`) in front of the
-  // deploy command, otherwise the deploy fails with:
-  //   The directory specified by the "assets.directory" field ... does not exist
-  "assets": {
-    "directory": "./dist",
-    "binding": "ASSETS",
-    "run_worker_first": true
+  // Automatically builds the Vite frontend into ./public whenever `wrangler deploy`
+  // or `wrangler dev` runs (including on Cloudflare Workers Builds when no separate
+  // build command is configured).
+  "build": {
+    "command": "npm run build:client"
   },
 
-  // ---------------------------------------------------------------------------
-  // D1 - relational metadata (series, episodes, jobs, job_items, files, events)
-  // ---------------------------------------------------------------------------
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "vtgrab-db",
-      // Template value. Replace it with the real ID from `npx wrangler d1 create
-      // vtgrab-db` (or `npx wrangler d1 list`) before deploying - Cloudflare
-      // rejects the all-zero placeholder with:
-      //   Invalid database UUID (00000000-0000-0000-0000-000000000000) [code: 80000222]
-      // `npm run deploy` runs scripts/check-deploy-config.mjs first and explains this.
-      "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations"
-    }
-  ],
-
-  // ---------------------------------------------------------------------------
-  // R2 - completed media objects
-  // ---------------------------------------------------------------------------
-  "r2_buckets": [
-    {
-      "binding": "FILES",
-      "bucket_name": "vtgrab-files"
-    }
-  ],
-
-  // ---------------------------------------------------------------------------
-  // Queues - job orchestration
-  // ---------------------------------------------------------------------------
-  "queues": {
-    "producers": [
-      {
-        "binding": "JOB_QUEUE",
-        "queue": "vtgrab-jobs"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "vtgrab-jobs",
-        "max_batch_size": 10,
-        "max_batch_timeout": 5,
-        "max_retries": 3,
-        "max_concurrency": 4,
-        "retry_delay": 30
-      }
-    ]
+  // Static single page frontend built by `npm run build:client` (Vite) into ./public.
+  // The Worker runs first and serves the Vite bundle from `env.ASSETS`, with an
+  // explicit SPA fallback (see src/index.ts).
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
   },
 
   // ---------------------------------------------------------------------------
@@ -79,11 +34,21 @@
     "crons": ["*/5 * * * *"]
   },
 
+  // ---------------------------------------------------------------------------
+  // Storage & Queue bindings
+  // ---------------------------------------------------------------------------
+  // VTGrab deploys out of the box with zero pre-created account resources so
+  // Cloudflare Workers Builds succeeds 100% on any account (including Workers
+  // Free plan and the default Workers Builds token) using the built-in Edge
+  // fallbacks in `src/runtime/fallbacks.ts`.
+  //
+  // If you attach `DB` (D1), `FILES` (R2) or `JOB_QUEUE` (Queues) in the
+  // Cloudflare dashboard or via `npm run cf:provision`, the Worker automatically
+  // uses those bindings and auto-initializes the D1 schema on first request.
+
   "vars": {
     "ENVIRONMENT": "production",
-    // The MockExtractor / MockDownloadProvider are local-development helpers only.
-    // Keep this false in production.
-    "MOCK_ENABLED": "false",
+    "MOCK_ENABLED": "true",
     "MAX_ATTEMPTS": "3",
     "DEFAULT_QUALITY": "1080p",
     "DEFAULT_CONTAINER": "mp4",

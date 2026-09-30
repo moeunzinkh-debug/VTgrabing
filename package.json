@@ -8,7 +8,7 @@
     "node": ">=20.11.0"
   },
   "scripts": {
-    "predev": "npm run build:client && wrangler d1 migrations apply vtgrab-db --local",
+    "predev": "npm run build:client",
     "dev": "wrangler dev --ip 0.0.0.0 --port 8787",
     "dev:client": "vite",
     "dev:remote": "wrangler dev --remote --ip 0.0.0.0 --port 8787",
@@ -22,7 +22,7 @@
     "cf:check": "node scripts/check-deploy-config.mjs",
     "cf:provision": "node scripts/provision-cloudflare.mjs",
     "db:create": "wrangler d1 create vtgrab-db",
-    "db:migrate:local": "wrangler d1 migrations apply vtgrab-db --local",
+    "db:migrate:local": "wrangler d1 migrations apply vtgrab-db-test --local --config wrangler.test.jsonc",
     "db:migrate": "wrangler d1 migrations apply vtgrab-db --remote",
     "db:list": "wrangler d1 execute vtgrab-db --remote --command \"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;\"",
     "r2:create": "wrangler r2 bucket create vtgrab-files",

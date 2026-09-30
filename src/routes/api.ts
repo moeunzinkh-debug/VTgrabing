@@ -23,9 +23,22 @@ import { describeDownloadProviders, resolveDownloadProvider } from '../providers
 import { JobService } from '../jobs/service';
 import { completeJobItemWithStream, finalizeJob, runMaintenance } from '../jobs/orchestrator';
 import { callbackPayload, verifySignature } from '../providers/signature';
+import { ensureRuntimeEnv, withAutoSchema } from '../runtime/fallbacks';
+import type { WaitUntilContext } from '../runtime/fallbacks';
 import type { EpisodeRecord, SeriesRecord } from '../shared/types';
 
 export const app = new Hono<{ Bindings: Env }>();
+
+app.use('*', async (context, next) => {
+  let ctx: WaitUntilContext | undefined;
+  try {
+    ctx = context.executionCtx;
+  } catch {
+    ctx = undefined;
+  }
+  ensureRuntimeEnv(context.env, ctx, context.req.url);
+  await next();
+});
 
 app.onError((error, _context) => jsonError(error));
 app.notFound((context) =>
@@ -40,7 +53,7 @@ app.get('/api/health', async (context) => {
   const env = context.env;
   let database = false;
   try {
-    const row = await env.DB.prepare('SELECT 1 AS ok').first<{ ok: number }>();
+    const row = await withAutoSchema(env.DB).prepare('SELECT 1 AS ok').first<{ ok: number }>();
     database = row?.ok === 1;
   } catch (error) {
     console.error('[vtgrab] health check failed', error);

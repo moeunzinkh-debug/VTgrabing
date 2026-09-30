@@ -2,6 +2,7 @@ import type { Env } from '../env';
 import { parseJson, stringifyJson } from '../core/json';
 import { newId } from '../core/ids';
 import { notFound } from '../core/errors';
+import { ensureRuntimeEnv, withAutoSchema } from '../runtime/fallbacks';
 import type {
   EpisodeRecord,
   FileRecord,
@@ -335,10 +336,12 @@ export type JobPatch = Partial<
 >;
 
 export class Repository {
-  constructor(private readonly env: Env) {}
+  constructor(private readonly env: Env) {
+    ensureRuntimeEnv(this.env);
+  }
 
   private get db(): D1Database {
-    return this.env.DB;
+    return withAutoSchema(ensureRuntimeEnv(this.env).DB);
   }
 
   // ------------------------------- series ----------------------------------
@@ -893,7 +896,23 @@ export class Repository {
         `INSERT INTO files (id, job_id, job_item_id, series_id, episode_id, bucket, object_key, filename,
                             content_type, size, etag, checksum_sha256, quality, container, duration_seconds,
                             provider, metadata, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bucket, object_key) DO UPDATE SET
+           job_id = excluded.job_id,
+           job_item_id = excluded.job_item_id,
+           series_id = excluded.series_id,
+           episode_id = excluded.episode_id,
+           filename = excluded.filename,
+           content_type = excluded.content_type,
+           size = excluded.size,
+           etag = excluded.etag,
+           checksum_sha256 = excluded.checksum_sha256,
+           quality = excluded.quality,
+           container = excluded.container,
+           duration_seconds = excluded.duration_seconds,
+           provider = excluded.provider,
+           metadata = excluded.metadata,
+           created_at = excluded.created_at`,
       )
       .bind(
         id,
@@ -916,7 +935,11 @@ export class Repository {
         timestamp,
       )
       .run();
-    return (await this.getFile(id))!;
+    const row = await this.db
+      .prepare(`SELECT * FROM files WHERE bucket = ? AND object_key = ?`)
+      .bind(input.bucket, input.objectKey)
+      .first<FileRow>();
+    return row ? mapFile(row) : (await this.getFile(id))!;
   }
 
   async getFile(id: string): Promise<FileRecord | null> {
