@@ -65,8 +65,14 @@ function alreadyExists(output) {
   return /already exist|duplicate|conflict|409/i.test(output);
 }
 
+const CI_MODE = process.argv.includes('--ci');
+
 function requireAuth() {
   if (!process.env.CLOUDFLARE_API_TOKEN) {
+    if (CI_MODE) {
+      console.log('[cf:provision] No CLOUDFLARE_API_TOKEN (local build) - skipping auto-provisioning.');
+      process.exit(0);
+    }
     console.error(`
 No Cloudflare credentials found.
 
@@ -163,6 +169,13 @@ console.log(
     ? `\nwrangler.jsonc now uses the real database_id (${databaseId}).`
     : `\nwrangler.jsonc already uses the real database_id (${databaseId}).`,
 );
+
+if (CI_MODE) {
+  const migrated = wrangler(['d1', 'migrations', 'apply', D1_NAME, '--remote']);
+  if (migrated.status !== 0) throw new Error('Remote D1 migrations failed');
+  console.log('\n[cf:provision] Resources ready, migrations applied.');
+  process.exit(0);
+}
 
 console.log(`
 Done. Next steps:
