@@ -1,0 +1,87 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vtgrab",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // Static single page frontend built by `npm run build:client` (Vite) into ./dist
+  // The Worker runs first and serves the Vite bundle from `env.ASSETS`, with an
+  // explicit SPA fallback (see src/index.ts).
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+
+  // ---------------------------------------------------------------------------
+  // D1 - relational metadata (series, episodes, jobs, job_items, files, events)
+  // ---------------------------------------------------------------------------
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vtgrab-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // ---------------------------------------------------------------------------
+  // R2 - completed media objects
+  // ---------------------------------------------------------------------------
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "vtgrab-files"
+    }
+  ],
+
+  // ---------------------------------------------------------------------------
+  // Queues - job orchestration
+  // ---------------------------------------------------------------------------
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOB_QUEUE",
+        "queue": "vtgrab-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "vtgrab-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "max_concurrency": 4,
+        "retry_delay": 30
+      }
+    ]
+  },
+
+  // ---------------------------------------------------------------------------
+  // Cron - maintenance: expire stale downloads, re-poll deferred provider jobs
+  // ---------------------------------------------------------------------------
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+
+  "vars": {
+    "ENVIRONMENT": "production",
+    // The MockExtractor / MockDownloadProvider are local-development helpers only.
+    // Keep this false in production.
+    "MOCK_ENABLED": "false",
+    "MAX_ATTEMPTS": "3",
+    "DEFAULT_QUALITY": "1080p",
+    "DEFAULT_CONTAINER": "mp4",
+    "DEFAULT_CONCURRENCY": "4",
+    "FILE_URL_TTL_SECONDS": "3600",
+    "QUEUE_PUSH_BATCH_SIZE": "100",
+    "STALE_ITEM_MINUTES": "20",
+    "SOURCE_ALLOWED_HOSTS": "",
+    "PUBLIC_BASE_URL": ""
+  }
+}

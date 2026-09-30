@@ -1,1 +1,450 @@
-# VTgrabing
+# VTGrab
+
+Series/episode analyzer and download-job orchestrator that runs entirely on
+**Cloudflare Workers** with **D1** (metadata), **R2** (objects) and **Queues**
+(orchestration). The frontend is a Vite-bundled single page app served as static
+assets by the same Worker.
+
+> **What this project is not.** VTGrab contains **no scraper, no DRM
+> circumvention and no bundled downloader**. In production it analyzes and
+> downloads only through services the operator is **authorized** to call (their
+> own catalog API and their own/partner download service). The `MockExtractor`
+> and `MockDownloadProvider` exist **only** for `wrangler dev` and the automated
+> tests; they generate clearly labelled synthetic bytes and are disabled by
+> default (`MOCK_ENABLED=false`).
+
+---
+
+## Table of contents
+
+1. [Architecture](#architecture)
+2. [Data model](#data-model)
+3. [Quick start (local)](#quick-start-local)
+4. [Deployment to Cloudflare (exact commands)](#deployment-to-cloudflare-exact-commands)
+5. [Environment variables & secrets](#environment-variables--secrets)
+6. [HTTP API](#http-api)
+7. [Authorized source integration (extractor contract)](#authorized-source-integration-extractor-contract)
+8. [Authorized download service (provider contract)](#authorized-download-service-provider-contract)
+9. [Runtime limitations of Workers and how this design handles them](#runtime-limitations-of-workers-and-how-this-design-handles-them)
+10. [Testing](#testing)
+11. [Project layout](#project-layout)
+12. [Khmer summary](#khmer-summary-សង្ខបជាភាសាខ្មរ)
+
+---
+
+## Architecture
+
+```
+                    ┌───────────────────────────────────────────────┐
+  browser ─────────▶│ Cloudflare Worker (src/index.ts, Hono router) │
+   (Vite SPA)       │                                               │
+                    │  POST /api/analyze  ──▶ SourceExtractor       │──▶ authorized catalog API
+                    │  POST /api/jobs     ──▶ JobService            │    (SOURCE_API_BASE_URL)
+                    │  GET  /api/jobs/:id ──▶ Repository (D1)       │
+                    │  GET  /api/files/:id/content ──▶ R2           │
+                    └───────────────┬───────────────────────────────┘
+                                    │ sendBatch()
+                                    ▼
+                          ┌──────────────────┐
+                          │ Queue  vtgrab-jobs│
+                          └────────┬─────────┘
+                                   │ queue() consumer
+                                   ▼
+                    ┌───────────────────────────────────────────────┐
+                    │ Orchestrator (src/jobs/orchestrator.ts)       │
+                    │  job.init / job.item / job.finalize           │
+                    │  concurrency limiter + retry with backoff     │
+                    └───────┬───────────────────────┬───────────────┘
+                            │ inline stream         │ deferred
+                            ▼                       ▼
+                   ┌─────────────────┐   ┌──────────────────────────────┐
+                   │ R2 (multipart)  │   │ authorized download service  │
+                   │ + files row     │◀──│ PUT callback (HMAC signed)   │
+                   └─────────────────┘   │ or poll GET /v1/downloads/:id│
+                                         └──────────────────────────────┘
+   cron */5 ───▶ runMaintenance(): polls stale deferred jobs, fails timeouts
+```
+
+State machine — job: `pending → running → completed | partial | failed | cancelled`.
+State machine — job item: `pending → downloading → completed | failed | cancelled`.
+
+`jobs` counters are **never** incremented by hand: `Repository.recomputeJob()`
+recomputes them from `job_items` and derives the job status, so progress can not
+drift (Queues is at-least-once, every handler is idempotent).
+
+---
+
+## Data model
+
+D1 tables (see `migrations/0001_init.sql`, `migrations/0002_job_events.sql`):
+
+| table       | purpose                                                              |
+| ----------- | -------------------------------------------------------------------- |
+| `series`    | one row per analyzed catalog entry (dedup by `canonical_url`)         |
+| `episodes`  | episodes of a series, 1-based `episode_index`, `streams` as JSON      |
+| `jobs`      | one download job: selection, options, counters, timestamps            |
+| `job_items` | one row per episode inside a job: status, progress, attempts, R2 key  |
+| `files`     | one row per stored object: bucket, key, size, etag, sha256, provider  |
+| `job_events`| append-only audit log rendered by the frontend "Activity" panel       |
+
+---
+
+## Quick start (local)
+
+```bash
+git clone <your-fork> vtgrab && cd vtgrab
+npm install
+
+# 1. create the local database from the migrations and build the frontend
+npm run dev            # `predev` runs `vite build` + `wrangler d1 migrations apply --local`
+
+# open http://localhost:8787
+```
+
+`npm run dev` starts `wrangler dev` bound to `0.0.0.0:8787` with **local** D1, R2
+and Queues. Copy `.dev.vars.example` to `.dev.vars` (git-ignored) — it enables the
+mock extractor/provider:
+
+```bash
+cp .dev.vars.example .dev.vars
+```
+
+Then, in the UI: paste `https://mock.local/series/anything` → **Analyze** →
+select episodes (checkbox, shift-click range, `from–to` range, Select all /
+Deselect all / Invert) → **Download selected** / **Download all** → watch the job
+progress from the backend (auto refresh every 2 s) → download the stored object
+from **Files in R2**.
+
+Useful extras:
+
+```bash
+npm run dev:client     # Vite dev server on :5173 with /api proxied to :8787 (HMR)
+npm run db:migrate:local
+npm run typecheck
+npm test
+npm run build
+```
+
+---
+
+## Deployment to Cloudflare (exact commands)
+
+```bash
+# 0. install and log in
+npm install
+npx wrangler login
+
+# 1. create the bindings
+npx wrangler d1 create vtgrab-db          # copy the printed database_id
+npx wrangler r2 bucket create vtgrab-files
+npx wrangler queues create vtgrab-jobs
+
+# 2. paste the D1 database_id into wrangler.jsonc (d1_databases[0].database_id)
+
+# 3. apply the schema to the remote database
+npx wrangler d1 migrations apply vtgrab-db --remote
+
+# 4. set secrets (never commit them)
+npx wrangler secret put SOURCE_API_TOKEN
+npx wrangler secret put DOWNLOAD_SERVICE_TOKEN
+npx wrangler secret put DOWNLOAD_CALLBACK_SECRET
+
+# 5. build (typecheck + Vite bundle + wrangler dry-run) and deploy
+npm run build
+npx wrangler deploy
+```
+
+First deploy only: after the Worker is live, set the public origin and the
+callback URL so the external download service can reach the Worker:
+
+```bash
+npx wrangler versions secret put PUBLIC_BASE_URL        # https://vtgrab.<subdomain>.workers.dev
+npx wrangler versions secret put DOWNLOAD_CALLBACK_URL  # same value, or your custom domain
+```
+
+> `PUBLIC_BASE_URL` / `DOWNLOAD_CALLBACK_URL` are declared as plain vars in
+> `wrangler.jsonc` (empty by default). A secret with the same name overrides the
+> var at runtime, so the commands above are the recommended way to set them.
+> Alternatively edit the `vars` block and redeploy.
+
+Verify:
+
+```bash
+curl https://<your-worker>.workers.dev/api/health
+curl https://<your-worker>.workers.dev/api/sources
+```
+
+Environment specific config can be added with
+[Wrangler environments](https://developers.cloudflare.com/wrangler/environments/)
+(`npx wrangler deploy --env staging`).
+
+---
+
+## Environment variables & secrets
+
+| name                       | kind   | default                     | meaning                                                                 |
+| -------------------------- | ------ | --------------------------- | ----------------------------------------------------------------------- |
+| `ENVIRONMENT`              | var    | `production`                | appears on `/api/sources` and in the UI badge                            |
+| `MOCK_ENABLED`             | var    | `false`                     | **dev only** – enables `MockExtractor` + `MockDownloadProvider`           |
+| `MAX_ATTEMPTS`             | var    | `3`                         | attempts per job item before it is marked `failed`                       |
+| `DEFAULT_QUALITY`          | var    | `1080p`                     | default quality for new jobs                                             |
+| `DEFAULT_CONTAINER`        | var    | `mp4`                       | default container/extension                                              |
+| `DEFAULT_CONCURRENCY`      | var    | `4`                         | in-flight downloads per job (also capped by the queue consumer)          |
+| `STALE_ITEM_MINUTES`       | var    | `20`                        | when the cron starts polling/failing a `downloading` item                |
+| `QUEUE_PUSH_BATCH_SIZE`    | var    | `100`                       | messages per `sendBatch()` (Queues hard limit is 100)                    |
+| `SOURCE_ALLOWED_HOSTS`     | var    | `""`                        | comma separated host allow-list for the authorized extractor             |
+| `PUBLIC_BASE_URL`          | var    | `""`                        | public origin of this Worker (used to build callback URLs)               |
+| `SOURCE_API_BASE_URL`      | var    | –                           | root URL of the authorized catalog API (`…/v1/series`)                   |
+| `SOURCE_API_TOKEN`         | secret | –                           | `Authorization: Bearer …` for the catalog API                            |
+| `DOWNLOAD_SERVICE_URL`     | var    | –                           | root URL of the authorized download service (`…/v1/downloads`)           |
+| `DOWNLOAD_SERVICE_TOKEN`   | secret | –                           | `Authorization: Bearer …` for the download service                       |
+| `DOWNLOAD_CALLBACK_SECRET` | secret | –                           | HMAC-SHA256 secret for callbacks **and** the maintenance endpoint token   |
+| `DOWNLOAD_CALLBACK_URL`    | var    | –                           | override of the callback origin (behind a proxy / custom domain)         |
+
+Bindings: `DB` (D1), `FILES` (R2), `JOB_QUEUE` (Queues producer + consumer).
+
+---
+
+## HTTP API
+
+| method  | path                                          | description                                              |
+| ------- | --------------------------------------------- | -------------------------------------------------------- |
+| `GET`   | `/api/health`                                 | liveness + D1 reachability                                |
+| `GET`   | `/api/sources`                                | extractor/provider availability, limits, binding status   |
+| `GET`   | `/api/providers`                              | default provider + descriptors (used by the UI)           |
+| `POST`  | `/api/analyze`                                | `{ url, sourceKey?, refresh? }` → series + episodes       |
+| `GET`   | `/api/series?q=&limit=&offset=`               | list series                                               |
+| `GET`   | `/api/series/:id`                             | series + episodes                                         |
+| `GET`   | `/api/series/:id/episodes`                    | episodes only                                             |
+| `DELETE`| `/api/series/:id`                             | delete a series (cascades to episodes/jobs)               |
+| `POST`  | `/api/jobs`                                   | `{ seriesId, selection, options? }` → job + items (201)   |
+| `GET`   | `/api/jobs?status=&seriesId=&limit=&offset=`  | list jobs with counters                                   |
+| `GET`   | `/api/jobs/:id`                               | job + items + series                                      |
+| `GET`   | `/api/jobs/:id/events`                        | audit log                                                 |
+| `POST`  | `/api/jobs/:id/cancel`                        | cancel open items (+ remote cancel)                       |
+| `POST`  | `/api/jobs/:id/retry`                         | re-queue `failed`/`cancelled` items                       |
+| `GET`   | `/api/files?jobId=&seriesId=&limit=&offset=`  | list stored files                                         |
+| `GET`   | `/api/files/:id`                              | file metadata + download URL                              |
+| `GET`   | `/api/files/:id/content`                      | stream from R2 (supports `Range`)                         |
+| `DELETE`| `/api/files/:id`                              | delete R2 object + row, release the job item              |
+| `PUT`   | `/api/internal/provider/callback/:jobItemId`  | **internal** – download service pushes the finished object |
+| `POST`  | `/api/internal/maintenance`                   | **internal** – run the cron work now (`Bearer <secret>`)   |
+
+Selection payloads accepted by `POST /api/jobs`:
+
+```jsonc
+{ "mode": "all" }
+{ "mode": "ids",   "episodeIds": ["ep_…", "ep_…"] }
+{ "mode": "range", "from": 2, "to": 12 }        // 1-based, inclusive, order independent
+```
+
+Options: `{ quality, container, concurrency, prefix, provider? }`.
+
+Errors are always `{"error":{"code","message","details?"}}` with
+`400 / 401 / 404 / 409 / 422 / 503`.
+
+---
+
+## Authorized source integration (extractor contract)
+
+Implement `SourceExtractor` (`src/providers/extract/types.ts`) or, without code
+changes, point `AuthorizedHttpExtractor` at an HTTP service you are allowed to
+call:
+
+```
+GET {SOURCE_API_BASE_URL}/v1/series?url={seriesUrl}
+Authorization: Bearer {SOURCE_API_TOKEN}
+Accept: application/json
+```
+
+```jsonc
+{
+  "id": "src_123",
+  "title": "Series title",
+  "synopsis": "…",            // optional
+  "posterUrl": "https://…",   // optional
+  "canonicalUrl": "…",        // optional, defaults to "authorized-http:<id>"
+  "episodes": [
+    {
+      "index": 1,
+      "title": "Episode 1",
+      "url": "https://…/episode/1",
+      "durationSeconds": 2640,                                   // optional
+      "thumbnailUrl": "https://…",                               // optional
+      "streams": [                                               // optional
+        { "quality": "1080p", "container": "mp4", "bitrateKbps": 5200,
+          "url": "https://cdn…/1080p.mp4", "codecs": "avc1.640028" }
+      ],
+      "metadata": {}                                             // optional
+    }
+  ],
+  "metadata": {}
+}
+```
+
+The response is validated with `authorizedSeriesResponseSchema`
+(`src/providers/extract/authorized.ts`); a schema violation or a non-2xx status
+surfaces as a real API error, never as a silently empty series. Hosts must be
+listed in `SOURCE_ALLOWED_HOSTS` before the extractor will call them.
+
+---
+
+## Authorized download service (provider contract)
+
+`RemoteDownloadProvider` (`src/providers/download/remote.ts`) speaks this
+protocol. Every outbound request carries
+`Authorization: Bearer {DOWNLOAD_SERVICE_TOKEN}` **and**
+`X-VTGrab-Timestamp` + `X-VTGrab-Signature: sha256=<hmac-sha256 of "{ts}.{body}">`.
+
+**1. Submit**
+
+```
+POST {DOWNLOAD_SERVICE_URL}/v1/downloads
+{
+  "jobItemId": "jit_…", "jobId": "job_…",
+  "callbackUrl": "https://<worker>/api/internal/provider/callback/jit_…?expires=…&sig=sha256%3D…",
+  "callbackMethod": "PUT", "callbackHeaders": { "content-type": "application/octet-stream" },
+  "objectKey": "vtgrab/series/S01E01-episode-1.mp4",
+  "quality": "1080p", "container": "mp4",
+  "series":  { "id": "ser_…", "title": "…" },
+  "episode": { "id": "ep_…", "index": 1, "title": "…", "url": "https://…", "streamUrl": "https://cdn…" }
+}
+```
+
+Responses:
+
+* `202 {"providerJobId": "pj_1", "status": "queued"}` → deferred; completion
+  arrives through the callback **or** through polling.
+* `200 {"providerJobId": "pj_1", "status": "ready", "downloadUrl": "https://…"}`
+  → the Worker streams `downloadUrl` into R2 immediately.
+
+**2. Callback (push)** — `PUT` the raw bytes to `callbackUrl`. The signature is an
+HMAC-SHA256 over `"{jobItemId}.{expires}"`; the service may also send
+`X-VTGrab-Ref: <providerJobId>`. The Worker verifies the signature and expiry,
+streams the body into R2 (multipart), inserts the `files` row and completes the
+item. Retried callbacks are idempotent.
+
+**3. Poll (pull)** — `GET {DOWNLOAD_SERVICE_URL}/v1/downloads/{providerJobId}`
+returns `{"status": "queued|running|ready|failed|cancelled", "progress"?, "downloadUrl"?, "bytes"?, "contentType"?, "error"?}`.
+The `*/5 * * * *` cron calls this for items that have been `downloading` longer
+than `STALE_ITEM_MINUTES`, streams `downloadUrl` into R2 when `ready`, and fails
+the item after `4 × STALE_ITEM_MINUTES`.
+
+**4. Cancel** — `DELETE {DOWNLOAD_SERVICE_URL}/v1/downloads/{providerJobId}` is
+called for every in-flight item when a user cancels a job.
+
+---
+
+## Runtime limitations of Workers and how this design handles them
+
+Cloudflare Workers **cannot** do what a desktop grabber does:
+
+| Limitation                                                     | Consequence                              | How VTGrab handles it                                                                 |
+| -------------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------- |
+| No filesystem, no child processes (no `ffmpeg`, no `yt-dlp`)    | media can not be muxed/transcoded locally | heavy work is delegated to `DOWNLOAD_SERVICE_URL`; Workers only orchestrate             |
+| ~128 MB memory per isolate                                     | a 4 GB file can not be buffered          | `writeStreamToR2()` streams 8 MiB parts into an R2 multipart upload                     |
+| Per-request CPU/wall-clock limits                              | long downloads would be killed           | work is split into one queue message per episode, with retry + backoff                  |
+| No outbound TCP sockets                                        | no custom protocols                      | all provider traffic is plain HTTPS `fetch`                                             |
+| Queues is at-least-once                                        | duplicate deliveries                     | every handler re-reads D1 before mutating; `files` has a UNIQUE `(bucket, object_key)`  |
+| Concurrency is not configurable per message                    | thundering herd on R2 / the provider     | `job.options.concurrency` is enforced by the consumer itself (re-queue with `delaySeconds`) |
+
+The integration boundary is therefore a **deployable HTTP contract**, not a fake
+local implementation: `MockDownloadProvider` is used only when
+`MOCK_ENABLED=true`, and on a production deployment with no
+`DOWNLOAD_SERVICE_URL` the API answers `503 not_configured` instead of pretending
+to download something.
+
+---
+
+## Testing
+
+```bash
+npm test          # vitest run
+npm run test:watch
+```
+
+The suite runs **inside the Workers runtime** with
+[`@cloudflare/vitest-pool-workers`](https://developers.cloudflare.com/workers/testing/vitest-integration/)
+against real local D1, R2 and Queue bindings (config: `wrangler.test.jsonc`,
+migrations applied in `test/setup.ts`). It covers:
+
+* analyze → D1 persistence, caching, validation, unauthorized-source rejection
+* selection resolution (`all` / `ids` / `range`, shift-click ranges)
+* job creation for selected / range / all episodes, counters, invalid payloads
+* the **queue consumer** really downloading, writing to R2 and completing jobs
+* cancel → retry → completion, audit events, conflict handling
+* R2 streaming writer: single put, 20 MiB multipart (byte-exact), empty stream
+* file download endpoint: content, `Range` requests, delete (R2 + D1)
+* HMAC signing/verification, signed callback URLs
+* the authorized extractor contract (allow-list, Bearer request, response schema)
+* the remote provider contract (submit → poll → stream to R2, maintenance sweep,
+  timeout failure)
+
+---
+
+## Project layout
+
+```
+migrations/            D1 schema (0001_init.sql, 0002_job_events.sql)
+src/
+  index.ts             Worker entry: fetch + queue + scheduled
+  env.ts               bindings & configuration helpers
+  routes/api.ts        Hono router (every /api route)
+  core/                errors, validation (zod), ids, json, selection, http
+  db/repository.ts     every D1 statement, row mappers, counters
+  jobs/service.ts      create / cancel / retry / dispatch
+  jobs/orchestrator.ts queue handlers, R2 completion, maintenance
+  queue/               message schema + consumer
+  providers/extract/   SourceExtractor: mock + authorized HTTP
+  providers/download/  DownloadProvider: mock + authorized remote service
+  providers/storage/   streaming R2 writer (multipart)
+  providers/signature.ts  HMAC-SHA256 request signing
+  frontend/            Vite SPA (index.html, app.ts, api.ts, styles.css)
+  shared/types.ts      domain types used by both bundles
+test/                  vitest-pool-workers suite
+```
+
+---
+
+## Khmer summary (សង្ខេបជាភាសាខ្មែរ)
+
+VTGrab ជា app ពិតដែលដំណើរការលើ **Cloudflare Workers** ដោយប្រើ **D1** (ទុក
+metadata), **R2** (ទុក file) និង **Queues** (ដំណើរការ job)។
+
+លំហូរការងារ៖
+
+1. បញ្ចូល URL → **Analyze** → Worker ហៅ **SourceExtractor** (production ប្រើ
+   Authorized catalog API ដែលអ្នកមានសិទ្ធ; local ប្រើ MockExtractor) រួចទុក
+   series + episodes ចូល D1។
+2. ជ្រើស episode (checkbox, shift-click, ជួរ `from–to`, Select all, Deselect
+   all, Invert) → បង្កើត **job**។ Job និង job item ត្រូវបានសរសេរចូល D1 ក្នុង
+   transaction តែមួយ ហើយផ្ញើ queue message មួយក្នុងមួយ episode។
+3. **Queue consumer** ទាញយក សរសេរ object ចូល R2 (stream ជា 8 MiB multipart)
+   បង្កើត row ក្នុង `files` ហើយធ្វើបច្ចុប្បន្នភាព progress។ មាន retry, cancel,
+   concurrency limiter និង cron សម្រាប់តាមដាន job ដែលយឺត។
+4. Frontend បង្ហាញស្ថានភាពពិតពី backend (pending, downloading, completed,
+   failed, cancelled) ដោយ auto-refresh រៀងរាល់ 2 វិនាទី ហើយអាចទាញយក file ពី
+   R2 តាម `/api/files/:id/content`។
+
+ចំណុចសំខាន់៖ **MockExtractor / MockDownloadProvider ប្រើតែសម្រាប់ local dev
+និង test ប៉ុណ្ណោះ** (បិទដោយ `MOCK_ENABLED=false`)។ វាបង្កើតទិន្នន័យសំយោគ
+(synthetic) ដែលសរសេរចំណាយថា "NOT REAL MEDIA" — មិនមែនការទាញយកវីដេអូពិតទេ។
+Production ប្រើ service ខាងក្រៅដែលមានការអនុញ្ញាត ( catalog API + download
+service) តាម HTTP contract និង HMAC signature ដែលមានចែងក្នុង README នេះ។
+
+ពាក្យបញ្ជាសំខាន់ៗ៖
+
+```bash
+npm install
+npm run dev      # http://localhost:8787 (ប្រើ D1/R2/Queues ក្នុងម៉ាស៊ីន)
+npm test
+npm run build
+npm run deploy   # build + wrangler deploy
+```
+
+---
+
+## License
+
+MIT — see the deployment and integration notes above before pointing this at a
+real catalog: only use sources you are authorized to access.

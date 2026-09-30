@@ -1,0 +1,53 @@
+{
+  // Dedicated configuration used by `npm test` (@cloudflare/vitest-pool-workers).
+  // It mirrors wrangler.jsonc bindings but intentionally omits the `assets`
+  // directory so the test suite never depends on a client build.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vtgrab-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vtgrab-db-test",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "vtgrab-files-test"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOB_QUEUE",
+        "queue": "vtgrab-jobs-test"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "vtgrab-jobs-test",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 3
+      }
+    ]
+  },
+  "vars": {
+    "ENVIRONMENT": "test",
+    "MOCK_ENABLED": "true",
+    "MAX_ATTEMPTS": "3",
+    "DEFAULT_QUALITY": "1080p",
+    "DEFAULT_CONTAINER": "mp4",
+    "DEFAULT_CONCURRENCY": "4",
+    "FILE_URL_TTL_SECONDS": "3600",
+    "QUEUE_PUSH_BATCH_SIZE": "100",
+    "STALE_ITEM_MINUTES": "20",
+    "SOURCE_ALLOWED_HOSTS": "",
+    "PUBLIC_BASE_URL": "https://vtgrab.example.com"
+  }
+}
