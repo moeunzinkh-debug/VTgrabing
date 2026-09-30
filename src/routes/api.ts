@@ -25,7 +25,7 @@ import {
 } from '../env';
 import { resolveExtractor, describeExtractors } from '../providers/extract/registry';
 import { describeDownloadProviders, resolveDownloadProvider } from '../providers/download/registry';
-import { JobService } from '../jobs/service';
+import { isListOnly, JobService } from '../jobs/service';
 import { completeJobItemWithStream, finalizeJob, runMaintenance } from '../jobs/orchestrator';
 import { callbackPayload, verifySignature } from '../providers/signature';
 import { ensureRuntimeEnv, withAutoSchema } from '../runtime/fallbacks';
@@ -135,7 +135,7 @@ app.post('/api/analyze', async (context) => {
     const cached = await repo.getSeriesBySourceUrl(url.toString());
     if (cached) {
       const episodes = await repo.listEpisodes(cached.id);
-      const job = input.queueAll && episodes.length > 0
+      const job = input.queueAll && episodes.some((episode) => !isListOnly(episode))
         ? await autoQueue(env, repo, cached.id)
         : null;
       return jsonOk({
@@ -184,7 +184,8 @@ app.post('/api/analyze', async (context) => {
   );
 
   let job: JobDetail | null = null;
-  if (input.queueAll && episodes.length > 0) {
+  // List-only results (TikTok analyzer) have nothing to queue; that is not an error.
+  if (input.queueAll && episodes.some((episode) => !isListOnly(episode))) {
     job = await autoQueue(env, repo, series.id);
   }
 

@@ -16,8 +16,15 @@ import type { EpisodeRecord, JobDetail, JobOptions, JobRecord } from '../shared/
  * Both are listed for the user but never queued, because queueing them could only
  * ever produce a failure.
  */
-function notFileReason(episode: EpisodeRecord): 'encrypted' | 'live' | null {
+export function isListOnly(episode: Pick<EpisodeRecord, 'streams' | 'metadata'>): boolean {
+  return episode.streams.length === 0 && episode.metadata.listOnly === true;
+}
+
+function notFileReason(episode: EpisodeRecord): 'encrypted' | 'live' | 'listing' | null {
   const streams = episode.streams;
+  // Listed by an analyzer that only reads public metadata (e.g. the TikTok link
+  // analyzer): there is no authorized stream to fetch, so there is nothing to queue.
+  if (isListOnly(episode)) return 'listing';
   if (streams.length === 0) {
     if (episode.metadata.encrypted === true) return 'encrypted';
     if (episode.metadata.live === true) return 'live';
@@ -60,6 +67,12 @@ export function buildObjectKey(input: {
   return `${input.prefix}/${series}/${episodeLabel(input.episodeIndex)}-${episode}${suffix}.${input.container}`;
 }
 
+function describeRefusal(reasons: Array<'encrypted' | 'live' | 'listing'>): string {
+  if (reasons.every((reason) => reason === 'live')) return 'a live broadcast';
+  if (reasons.every((reason) => reason === 'listing')) return 'listed for reference only (no authorized download source is configured for it)';
+  return 'encrypted (DRM / #EXT-X-KEY)';
+}
+
 export class JobService {
   constructor(private readonly env: Env, private readonly repo: Repository) {}
 
@@ -81,13 +94,13 @@ export class JobService {
     // produce failures. They are reported instead.
     const refused = picked
       .map((episode) => ({ episode, reason: notFileReason(episode) }))
-      .filter((entry): entry is { episode: EpisodeRecord; reason: 'encrypted' | 'live' } => entry.reason !== null);
+      .filter((entry): entry is { episode: EpisodeRecord; reason: 'encrypted' | 'live' | 'listing' } => entry.reason !== null);
     const blocked = new Set(refused.map((entry) => entry.episode.id));
     const selected = picked.filter((episode) => !blocked.has(episode.id));
     if (selected.length === 0) {
       throw badRequest(
         refused.length > 0
-          ? `Every selected video is ${refused.every((entry) => entry.reason === 'live') ? 'a live broadcast' : 'encrypted (DRM / #EXT-X-KEY)'} - there is no finished file for VTGrab to download.`
+          ? `Every selected video is ${describeRefusal(refused.map((entry) => entry.reason))} - there is no finished file for VTGrab to download.`
           : 'Selection resolved to zero episodes. Run analyze again with refresh.',
         {
           selection: input.selection,
@@ -134,7 +147,12 @@ export class JobService {
     if (refused.length > 0) {
       const encrypted = refused.filter((entry) => entry.reason === 'encrypted').length;
       const live = refused.filter((entry) => entry.reason === 'live').length;
-      const why = [encrypted > 0 ? `${encrypted} encrypted` : '', live > 0 ? `${live} live broadcast(s)` : ''].filter(Boolean).join(', ');
+      const listing = refused.filter((entry) => entry.reason === 'listing').length;
+      const why = [
+        encrypted > 0 ? `${encrypted} encrypted` : '',
+        live > 0 ? `${live} live broadcast(s)` : '',
+        listing > 0 ? `${listing} listed for reference only` : '',
+      ].filter(Boolean).join(', ');
       await this.repo.appendEvent({
         jobId: job.id,
         level: 'warn',

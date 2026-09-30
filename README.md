@@ -20,7 +20,7 @@ assets by the same Worker.
 1. [Architecture](#architecture)
 2. [Data model](#data-model)
 3. [Quick start (local)](#quick-start-local)
-4. [Real link grabbing](#real-link-grabbing)
+4. [Real link grabbing](#real-link-grabbing) · [TikTok link analysis](#tiktok-link-analysis)
 5. [Deployment to Cloudflare (exact commands)](#deployment-to-cloudflare-exact-commands)
 6. [Environment variables & secrets](#environment-variables--secrets)
 7. [HTTP API](#http-api)
@@ -244,6 +244,51 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 \
 Against a real internet host, deploy the Worker (`npm run deploy`) and analyze any page
 whose videos are publicly reachable - a deployed Worker has normal outbound access, which
 a sandboxed dev server usually does not.
+
+---
+
+## TikTok link analysis
+
+Paste a TikTok link and the tool shows what it is and lists its episodes:
+
+```
+Paste TikTok URL
+  -> resolve short URL                 vm.tiktok.com / vt.tiktok.com / tiktok.com/t/...
+  -> public page, or public oEmbed     (or your authorized catalog API, see below)
+  -> mini-drama or normal video?
+  -> title, episode number, episode list
+  -> shown in the tool (section "2. Videos found on that link")
+```
+
+Implemented by `src/providers/extract/tiktok.ts` (network) and `src/grab/tiktok.ts`
+(pure parsing/classification, unit-tested in `test/tiktok.test.ts`). It is registered
+as extractor `tiktok`, ahead of the generic `http-sniff`.
+
+* **Resolve.** A short link is followed hop by hop; every hop must stay on `tiktok.com`
+  and pass the normal host policy, so a short link can never steer the Worker elsewhere.
+  Tracking parameters (`_r`, `u_code`, `share_*`, ...) are dropped.
+* **Read.** The public HTML's embedded page data (`__UNIVERSAL_DATA_FOR_REHYDRATION__`),
+  then Open Graph tags, then the public `oembed` endpoint if the page is walled. No
+  login, no cookies, **no attempt to get past a captcha / bot check**: if TikTok returns
+  nothing public, the error says so.
+* **Classify.** *mini-drama* when the page labels a series/drama itself, or enough of
+  these add up: a specific drama hashtag (`#minidrama`, `#shortmax`, `#reelshort`, ...),
+  an episode marker in the caption (`EP 12/60`, `Episode 5`, `Part 3`, `Tập 9`,
+  `វគ្គ ១២`, `第8集`, ...), membership of a playlist with 3+ videos. A lone `#drama` or a
+  lone "Part 2" stays a *normal video*. The verdict, its confidence and the **reasons**
+  are shown in the UI.
+* **Episode list.** Taken from the playlist data the public page exposes. When the page
+  shows only your episode (or `x of N`), the tool says the list is partial instead of
+  inventing the rest. For the complete list, point `SOURCE_API_BASE_URL` at a catalog you
+  are licensed to use and add `tiktok.com` to `SOURCE_ALLOWED_HOSTS`: the authorized
+  extractor then takes over these links (registry position 1).
+* **Listing only.** TikTok episodes carry no streams and are marked `listOnly`. They are
+  shown (with `EP n`, "your link", duration, cover) but are never queued or downloaded by
+  this extractor; `/api/analyze` with *queue all* returns the list without a job.
+
+> TikTok's page layout is not a public contract. The readers are defensive and covered by
+> fixtures, but if a real page stops yielding a playlist the result degrades to the
+> single-episode listing above rather than to wrong data.
 
 ---
 
@@ -530,7 +575,7 @@ src/
   queue/               message schema + consumer
   grab/                the real grabber: host policy, HTTP budget, sniffing, HLS/DASH
                        readers, ranged + segmented byte transfer
-  providers/extract/   SourceExtractor: http-sniff (real) + mock + authorized HTTP
+  providers/extract/   SourceExtractor: tiktok + http-sniff (real) + mock + authorized HTTP
   providers/download/  DownloadProvider: http-stream (real) + mock + remote service
   providers/storage/   streaming R2 writer (multipart)
   providers/signature.ts  HMAC-SHA256 request signing

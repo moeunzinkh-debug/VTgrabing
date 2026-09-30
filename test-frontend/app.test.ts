@@ -411,4 +411,63 @@ describe('VTGrab frontend', () => {
     expect($('jobs-list').textContent).toContain('job_grab');
   });
 
+  it('shows the TikTok verdict, episode numbers and a list-only episode list', async () => {
+    const tiktokSeries: SeriesRecord = {
+      ...series,
+      sourceKey: 'tiktok',
+      sourceUrl: 'https://vm.tiktok.com/ZM1/',
+      canonicalUrl: 'tiktok:playlist:1',
+      title: 'Secret Wife',
+      episodeCount: 2,
+      metadata: {
+        contentKind: 'mini-drama',
+        confidence: 'high',
+        signals: ['drama hashtag: #minidrama', 'video belongs to a playlist'],
+        currentEpisodeNumber: 12,
+        totalEpisodes: 60,
+        listNote: 'The public page lists 2 of 60 episodes.',
+        resolvedUrl: 'https://www.tiktok.com/@a/video/12',
+      },
+    };
+    const tiktokEpisodes: EpisodeRecord[] = [11, 12].map((n, i) => ({
+      ...episodes[0],
+      id: `tt_${n}`,
+      episodeIndex: i + 1,
+      title: 'Secret Wife',
+      sourceUrl: `https://www.tiktok.com/@a/video/${n}`,
+      streams: [],
+      metadata: { listOnly: true, episodeNumber: n, current: n === 12 },
+    }));
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/sources')) return jsonResponse(sources);
+      if (url.startsWith('/api/analyze')) {
+        return jsonResponse({ series: tiktokSeries, episodes: tiktokEpisodes, extractor: 'tiktok', cached: false });
+      }
+      return jsonResponse({ items: [], total: 0 });
+    });
+    mountApp();
+    await flush();
+    $<HTMLInputElement>('analyze-url').value = 'https://vm.tiktok.com/ZM1/';
+    $('analyze-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flush();
+
+    const header = $('series-header').textContent ?? '';
+    expect(header).toContain('Mini-drama');
+    expect(header).toContain('high confidence');
+    expect(header).toContain('this link: EP 12 / 60');
+    expect(header).toContain('Why: drama hashtag');
+    expect(header).toContain('lists 2 of 60');
+    expect(header).toContain('resolved: https://www.tiktok.com/@a/video/12');
+
+    const grid = $('episode-grid');
+    expect(grid.textContent).toContain('EP 11');
+    expect(grid.textContent).toContain('EP 12');
+    expect(grid.textContent).toContain('your link');
+    expect(grid.textContent).toContain('listed only');
+    expect(grid.querySelectorAll('.episode-listed')).toHaveLength(2);
+    expect($('selection-count').textContent).toBe('0 / 2 selected');
+    expect($('queue-note').textContent).toContain('listed for reference only');
+  });
+
 });
