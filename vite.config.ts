@@ -1,12 +1,12 @@
 import { defineConfig } from 'vite';
 
-// Bundles the single page frontend into ./dist, which wrangler serves as static assets.
+// Bundles the single page frontend into ./public, which wrangler serves as static assets.
 export default defineConfig({
   root: 'src/frontend',
-  base: './',
+  base: '/',
   publicDir: false,
   build: {
-    outDir: '../../dist',
+    outDir: '../../public',
     emptyOutDir: true,
     target: 'es2022',
     sourcemap: false,

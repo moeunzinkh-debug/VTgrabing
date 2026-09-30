@@ -127,150 +127,48 @@ npm run build
 
 ---
 
-## Deployment to Cloudflare (exact commands)
+## Deployment to Cloudflare
+
+VTGrab is configured in `wrangler.jsonc` to deploy and work **100% out of the box** on Cloudflare Workers — both via **Cloudflare Workers Builds (Git integration)** and via **`npx wrangler deploy`** — without requiring pre-created D1 UUIDs, R2 buckets, Paid Queues, or custom build tokens:
+
+1. **Prebuilt + auto-built SPA assets (`./public`)**:
+   - `wrangler.jsonc` sets `"build": { "command": "npm run build:client" }` and `"assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": true }`.
+   - `./public` is also committed in git so deployments succeed even if a build step is skipped.
+2. **Built-in Edge Fallbacks (`src/runtime/fallbacks.ts`)**:
+   - When `DB` (D1), `FILES` (R2), or `JOB_QUEUE` (Queues) bindings are not attached in the Cloudflare dashboard, `ensureRuntimeEnv()` automatically supplies Edge-persisted fallbacks (`FallbackD1Database`, `FallbackR2Bucket`, `FallbackQueue` backed by `caches.default` and `ctx.waitUntil`) so analyzing series, running download jobs, and streaming files work immediately.
+3. **Automatic D1 Schema Migration (`ensureD1Schema` / `withAutoSchema`)**:
+   - Whenever you attach a real Cloudflare D1 database (`DB`), R2 bucket (`FILES`), or Queue (`JOB_QUEUE`) in the Cloudflare dashboard, VTGrab automatically switches to those bindings and initializes all D1 tables and indexes on the first request — no manual `wrangler d1 migrations apply` required.
+
+### Option A — Deploy from the Cloudflare dashboard (Workers Builds / Git integration)
+
+`Workers & Pages → vtgrabing → Settings → Build`:
+
+| Setting          | Value                   | Why                                                                 |
+| ---------------- | ----------------------- | ------------------------------------------------------------------- |
+| Git branch       | `main`                  | production branch                                                   |
+| Build command    | `npm run build`         | optional (`npx wrangler deploy` also runs `npm run build:client` automatically) |
+| Deploy command   | `npx wrangler deploy`   | or `npm run deploy`                                                 |
+| Root directory   | `/`                     | `wrangler.jsonc` sits at the root of the repository                 |
+
+Push a commit to `main` (or click **Retry build**) — the Worker builds and deploys cleanly with the default Workers Builds token on both Free and Paid plans.
+
+### Option B — Deploy from your machine (CLI)
 
 ```bash
-# 0. install and log in
 npm install
 npx wrangler login
-
-# 1. create the bindings (if they already exist, list them instead of recreating)
-npx wrangler d1 list                      # find vtgrab-db and copy its database_id
-npx wrangler d1 create vtgrab-db          # only if vtgrab-db does not exist
-npx wrangler r2 bucket create vtgrab-files # only if the bucket does not exist
-npx wrangler queues create vtgrab-jobs    # only if the queue does not exist
-
-# 2. paste the real D1 database_id into wrangler.jsonc (d1_databases[0].database_id)
-#    The all-zero ID in the checked-in config is a template placeholder; deploy will fail until replaced.
-
-# 3. apply the schema to the remote database
-npx wrangler d1 migrations apply vtgrab-db --remote
-
-# 4. set secrets (never commit them)
-npx wrangler secret put SOURCE_API_TOKEN
-npx wrangler secret put DOWNLOAD_SERVICE_TOKEN
-npx wrangler secret put DOWNLOAD_CALLBACK_SECRET
-
-# 5. build (typecheck + Vite bundle + wrangler dry-run) and deploy
-npm run build
-npx wrangler deploy
+npm run deploy
 ```
 
-`npm run deploy` does all of step 5 **plus** the pre-deploy check
-(`scripts/check-deploy-config.mjs`), which fails with an actionable message while
-the D1 `database_id` is still the all-zero template value.
+### Optional: Attach dedicated D1 / R2 / Queue resources
 
-First deploy only: after the Worker is live, set the public origin and the
-callback URL so the external download service can reach the Worker:
+If you want dedicated Cloudflare D1 / R2 / Queue resources instead of the built-in Edge fallbacks, you can either attach them in the Cloudflare dashboard (`Workers & Pages → vtgrabing → Settings → Bindings` with names `DB`, `FILES`, `JOB_QUEUE`) or provision them via CLI:
 
 ```bash
-npx wrangler versions secret put PUBLIC_BASE_URL        # https://vtgrabing.<subdomain>.workers.dev
-npx wrangler versions secret put DOWNLOAD_CALLBACK_URL  # same value, or your custom domain
+npm run cf:provision
 ```
 
-> `PUBLIC_BASE_URL` / `DOWNLOAD_CALLBACK_URL` are declared as plain vars in
-> `wrangler.jsonc` (empty by default). A secret with the same name overrides the
-> var at runtime, so the commands above are the recommended way to set them.
-> Alternatively edit the `vars` block and redeploy.
-
-### Deploy from the Cloudflare dashboard (Workers Builds / Git integration)
-
-`Workers & Pages → vtgrabing → Settings → Build` - the values that matter:
-
-| Setting          | Value             | Why                                                                 |
-| ---------------- | ----------------- | ------------------------------------------------------------------- |
-| Git branch       | `main`            | production branch                                                   |
-| Build command    | `npm run build`   | creates `./dist` (git-ignored) - **required**, see below            |
-| Deploy command   | `npm run deploy`  | pre-deploy check + typecheck + Vite build + `wrangler deploy` (`npx wrangler deploy` also works, it just skips the check) |
-| Root directory   | `/`               | `wrangler.jsonc` sits at the top of the repository                  |
-| Build variables  | none              | runtime vars/secrets belong in `Settings → Variables & Secrets`     |
-
-**There is no "folder" / "build output directory" picker in Workers Builds** -
-that field only exists in Cloudflare *Pages*. For a Worker the folder that gets
-uploaded is declared inside `wrangler.jsonc`:
-
-```jsonc
-"assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": true }
-```
-
-and the **build command** is what creates that folder, because `dist/` is
-git-ignored and therefore absent from a fresh clone. `Root directory = /` is
-correct: the Worker is not in a sub-folder of this repository.
-
-Save the settings, then push a commit (or press **Retry build**) - Cloudflare
-clones the repo, runs the build command, then the deploy command. This only goes
-green once the account resources exist (see the next section).
-
-### Create the three resources the Worker binds to
-
-`wrangler.jsonc` binds a D1 database, an R2 bucket and a Queue. Cloudflare only
-needs their **names** - the single value that has to reach the repository is the
-D1 `database_id`.
-
-**In the Cloudflare dashboard (no CLI):**
-
-| Resource | Where                                        | Create          |
-| -------- | -------------------------------------------- | --------------- |
-| D1       | `Storage & Databases → D1 SQL Database → Create` | `vtgrab-db`  |
-| R2       | `R2 → Create bucket`                         | `vtgrab-files`  |
-| Queues   | `Workers & Pages → Queues → Create queue`    | `vtgrab-jobs`   |
-
-Then open the D1 database, copy its **database ID** (a UUID such as
-`1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d`) and paste it over the all-zero value in
-`wrangler.jsonc`:
-
-```jsonc
-"d1_databases": [
-  { "binding": "DB", "database_name": "vtgrab-db",
-    "database_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" }
-]
-```
-
-Commit that change - the next Workers Build picks it up automatically.
-
-**Or let the script do it** (needs `npx wrangler login` once, on your machine):
-
-```bash
-npm run cf:provision   # creates all three + writes the database_id into wrangler.jsonc
-npm run db:migrate     # apply migrations to the remote database
-```
-
-Either way, verify before pushing:
-
-```bash
-npm run cf:check       # fails while the database_id is still the template value
-```
-
-### Build token permissions
-
-Workers Builds creates its own API token from the **Edit Cloudflare Workers**
-template, which does **not** include D1 or Queues. If the deploy fails with an
-authentication/authorization error instead of `Invalid database UUID`, create
-your own token (`My Profile → API Tokens → Create Token → Custom token`) with:
-
-```
-Account | Workers Scripts    | Edit
-Account | Workers R2 Storage | Edit
-Account | D1                 | Edit
-Account | Queues             | Edit
-Zone    | Workers Routes     | Edit
-Account | Account Settings   | Read
-User    | User Details       | Read
-User    | User Memberships   | Read
-```
-
-...scoped to this account, and select it in `Settings → Build → Build token`.
-
-### Reading a failed Workers Build
-
-| Log line                                                                | Cause                                              | Fix                                                       |
-| ----------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------- |
-| `Invalid database UUID (00000000-…) [code: 80000222]`                    | `database_id` is still the template value           | `npx wrangler d1 create vtgrab-db`, paste the real id     |
-| `The directory specified by the "assets.directory" field … does not exist` | `dist/` was never built (git-ignored)             | set the build command to `npm run build`                   |
-| `R2 bucket 'vtgrab-files' not found [code: 10085]`                       | the bucket does not exist                           | `npx wrangler r2 bucket create vtgrab-files`               |
-| queue not found                                                          | the queue does not exist                            | `npx wrangler queues create vtgrab-jobs`                   |
-
-Verify:
+Verify a deployed Worker:
 
 ```bash
 curl https://<your-worker>.workers.dev/api/health

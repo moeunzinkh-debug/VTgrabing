@@ -112,7 +112,7 @@ function renderStatus(): void {
   const badges = $('env-badges');
   clear(badges);
   if (state.status) {
-    badges.appendChild(chip(state.status.environment, state.status.environment === 'production' ? 'warn' : 'ok'));
+    badges.appendChild(chip(state.status.environment, 'ok'));
     badges.appendChild(
       chip(state.status.bindings.database ? 'D1' : 'D1 missing', state.status.bindings.database ? 'ok' : 'error'),
     );
@@ -124,10 +124,12 @@ function renderStatus(): void {
     );
   }
 
-  for (const provider of state.status?.downloadProviders ?? []) {
+  const providers = state.status?.downloadProviders ?? [];
+  const anyAvailable = providers.some((provider) => provider.available);
+  for (const provider of providers) {
     const providerChip = chip(
       `${provider.kind === 'mock' ? 'mock' : 'remote'}: ${provider.key}${provider.available ? '' : ' (off)'}`,
-      provider.available ? (provider.kind === 'mock' ? 'warn' : 'ok') : 'error',
+      provider.available ? 'ok' : anyAvailable ? 'muted' : 'error',
     );
     providerChip.title = provider.reason ?? '';
     badges.appendChild(providerChip);
@@ -510,7 +512,11 @@ function renderFiles(): void {
 
 async function runAnalyze(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  const url = $<HTMLInputElement>('analyze-url').value.trim();
+  let url = $<HTMLInputElement>('analyze-url').value.trim();
+  if (url && !/^https?:\/\//i.test(url) && /^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(url)) {
+    url = `https://${url}`;
+    $<HTMLInputElement>('analyze-url').value = url;
+  }
   const sourceKey = $<HTMLSelectElement>('analyze-source').value || undefined;
   const refresh = $<HTMLInputElement>('analyze-refresh').checked;
 
