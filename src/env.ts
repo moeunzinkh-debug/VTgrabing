@@ -46,6 +46,8 @@ export interface Env {
   // ---- real link grabber (src/grab/*) ---------------------------------------
   /** Master switch for the sniff extractor + the real HTTP downloader. */
   GRAB_ENABLED?: string;
+  /** Explicit opt-in for the unofficial SSSTik single-video TikTok provider. */
+  TIKTOK_SSTIK_ENABLED?: string;
   /** Optional allow-list of hosts the grabber may open (empty = any public host). */
   GRAB_ALLOWED_HOSTS?: string;
   /** Hosts the grabber must never open, even if the allow-list accepts them. */

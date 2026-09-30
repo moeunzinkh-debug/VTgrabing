@@ -20,11 +20,15 @@ export function isListOnly(episode: Pick<EpisodeRecord, 'streams' | 'metadata'>)
   return episode.streams.length === 0 && episode.metadata.listOnly === true;
 }
 
-function notFileReason(episode: EpisodeRecord): 'encrypted' | 'live' | 'listing' | null {
+function notFileReason(episode: EpisodeRecord, providerKey?: string): 'encrypted' | 'live' | 'listing' | null {
   const streams = episode.streams;
   // Listed by an analyzer that only reads public metadata (e.g. the TikTok link
-  // analyzer): there is no authorized stream to fetch, so there is nothing to queue.
-  if (isListOnly(episode)) return 'listing';
+  // analyzer): there is no direct stream to fetch. The explicit SSSTik provider is
+  // the one narrowly-scoped third-party exception; it accepts one public TikTok post.
+  if (isListOnly(episode)) {
+    if (providerKey === 'tiktok-ssstik' && episode.metadata.platform === 'tiktok') return null;
+    return 'listing';
+  }
   if (streams.length === 0) {
     if (episode.metadata.encrypted === true) return 'encrypted';
     if (episode.metadata.live === true) return 'live';
@@ -86,6 +90,19 @@ export class JobService {
       throw badRequest('Series has no episodes. Run analyze again.');
     }
 
+    const options = buildJobOptions(this.env, input.options);
+    // Fail fast (before writing anything) when no usable provider is configured.
+    const provider = resolveDownloadProvider(this.env, options.provider);
+    options.provider = provider.key;
+    if (provider.key === 'tiktok-ssstik' && input.options?.thirdPartyConsent !== true) {
+      throw badRequest(
+        'Confirm that you own or have permission to download this TikTok video and agree to send its URL to the unofficial third-party SSSTik service.',
+      );
+    }
+    if (provider.key === 'tiktok-ssstik' && series.sourceKey !== 'tiktok') {
+      throw badRequest('The SSSTik provider only supports TikTok post listings; choose another provider for this source.');
+    }
+
     const selectedIds = new Set(resolveSelection(episodes, input.selection).map((pick) => pick.id));
     const picked = episodes.filter((episode) => selectedIds.has(episode.id));
 
@@ -93,7 +110,7 @@ export class JobService {
     // the grabber does not fetch keys or decrypt, so queueing them would only
     // produce failures. They are reported instead.
     const refused = picked
-      .map((episode) => ({ episode, reason: notFileReason(episode) }))
+      .map((episode) => ({ episode, reason: notFileReason(episode, provider.key) }))
       .filter((entry): entry is { episode: EpisodeRecord; reason: 'encrypted' | 'live' | 'listing' } => entry.reason !== null);
     const blocked = new Set(refused.map((entry) => entry.episode.id));
     const selected = picked.filter((episode) => !blocked.has(episode.id));
@@ -111,10 +128,6 @@ export class JobService {
       );
     }
 
-    const options = buildJobOptions(this.env, input.options);
-    // Fail fast (before writing anything) when no usable provider is configured.
-    const provider = resolveDownloadProvider(this.env, options.provider);
-    options.provider = provider.key;
     const isMock = provider.key === 'mock';
 
     const job = await this.repo.createJob({

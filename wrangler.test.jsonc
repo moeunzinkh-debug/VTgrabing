@@ -51,6 +51,7 @@
     "PUBLIC_BASE_URL": "https://vtgrab.example.com",
     // The automated suite drives the deterministic mock pipeline; the real
     // grabber (network I/O) is covered in test/grab.test.ts with a stubbed fetch.
-    "GRAB_ENABLED": "false"
+    "GRAB_ENABLED": "false",
+    "TIKTOK_SSTIK_ENABLED": "false"
   }
 }

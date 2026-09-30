@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../src/frontend/app';
-import type { EpisodeRecord, SeriesRecord } from '../src/shared/types';
+import type { EpisodeRecord, FileRecord, SeriesRecord } from '../src/shared/types';
 
 const HTML = readFileSync(resolve(__dirname, '../src/frontend/index.html'), 'utf8');
 
@@ -304,7 +304,8 @@ describe('VTGrab frontend', () => {
     expect(body.selection.episodeIds).toEqual(['ep_1', 'ep_2']);
     expect(body.options.quality).toBe('720p');
     expect(body.options.prefix).toBe('ui-test');
-    expect($('job-create-status').textContent).toContain('job job_1 created');
+    expect($('job-create-status').textContent).toContain('job job_1 queued');
+    expect($('analyze-result').textContent).toContain('not a saved video yet');
   });
 
   it('download-all sends mode "all" regardless of the checkbox selection', async () => {
@@ -403,12 +404,73 @@ describe('VTGrab frontend', () => {
     expect($('analyze-diag').hidden).toBe(false);
     expect($('analyze-diag-text').textContent).toContain('probe: 4 candidate(s) confirmed');
 
-    // a media preview goes through the guarded proxy, never directly at the host
+    // Source playback is embedded on demand through the guarded Worker proxy.
     const preview = Array.from(grid.querySelectorAll('a')).find((link) => (link.getAttribute('href') ?? '').startsWith('/api/preview?url='));
     expect(preview?.getAttribute('href')).toContain(encodeURIComponent('http://127.0.0.1:8099/media/bunny.mp4'));
+    const watchHere = grid.querySelector<HTMLButtonElement>('.preview-toggle');
+    expect(watchHere?.textContent).toBe('Watch here');
+    watchHere?.click();
+    const sourcePlayer = grid.querySelector<HTMLVideoElement>('.episode-preview video');
+    expect(sourcePlayer).not.toBeNull();
+    expect(sourcePlayer?.getAttribute('src')).toContain('/api/preview?url=');
+    expect(sourcePlayer?.getAttribute('src')).toContain(encodeURIComponent('http://127.0.0.1:8099/media/bunny.mp4'));
+    expect($('analyze-result').textContent).toContain('not a saved video yet');
 
     // the job analyze created for us shows up in the jobs panel without a reload
     expect($('jobs-list').textContent).toContain('job_grab');
+  });
+
+  it('plays completed real downloads inline and clearly marks mock bytes as synthetic', async () => {
+    const downloaded: FileRecord = {
+      id: 'fil_video',
+      jobId: 'job_video',
+      jobItemId: 'item_video',
+      seriesId: 'ser_1',
+      episodeId: 'ep_1',
+      bucket: 'FILES',
+      objectKey: 'vtgrab/test/episode.mp4',
+      filename: 'episode.mp4',
+      contentType: 'video/mp4',
+      size: 2048,
+      etag: null,
+      checksumSha256: null,
+      quality: '1080p',
+      container: 'mp4',
+      durationSeconds: 12,
+      provider: 'http-stream',
+      metadata: {},
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    const mockFile: FileRecord = {
+      ...downloaded,
+      id: 'fil_mock',
+      objectKey: 'vtgrab/test/episode.mock.mp4',
+      filename: 'episode.mock.mp4',
+      contentType: 'application/octet-stream',
+      provider: 'mock',
+    };
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/sources')) return jsonResponse(sources);
+      if (url.startsWith('/api/jobs?')) return jsonResponse({ items: [], total: 0 });
+      if (url.startsWith('/api/files?')) return jsonResponse({ items: [downloaded, mockFile], total: 2 });
+      return jsonResponse({ items: [], total: 0 });
+    });
+
+    mountApp();
+    await flush();
+
+    const files = $('files-list');
+    expect(files.textContent).toContain('mock · synthetic only');
+    expect(files.textContent).toContain('not a real video');
+    const play = files.querySelector<HTMLButtonElement>('.file-play');
+    expect(play?.textContent).toBe('Play here');
+    play?.click();
+
+    const player = files.querySelector<HTMLVideoElement>('.file-preview video');
+    expect(player).not.toBeNull();
+    expect(player?.getAttribute('src')).toBe('/api/files/fil_video/content?inline=1');
+    expect(files.querySelector('.file-preview-row')?.hasAttribute('hidden')).toBe(false);
   });
 
   it('shows the TikTok verdict, episode numbers and a list-only episode list', async () => {
@@ -468,6 +530,84 @@ describe('VTGrab frontend', () => {
     expect(grid.querySelectorAll('.episode-listed')).toHaveLength(2);
     expect($('selection-count').textContent).toBe('0 / 2 selected');
     expect($('queue-note').textContent).toContain('listed for reference only');
+  });
+
+  it('requires rights/third-party consent before using the optional SSSTik provider', async () => {
+    const tiktokSeries: SeriesRecord = {
+      ...series,
+      sourceKey: 'tiktok',
+      title: 'Authorized TikTok posts',
+      metadata: { platform: 'tiktok' },
+    };
+    const tiktokEpisodes: EpisodeRecord[] = [1, 2].map((n) => ({
+      ...episodes[0],
+      id: `ssstik_${n}`,
+      episodeIndex: n,
+      title: `TikTok post ${n}`,
+      sourceUrl: `https://www.tiktok.com/@creator/video/123456789012345678${n}`,
+      streams: [],
+      metadata: { platform: 'tiktok', listOnly: true },
+    }));
+    const providerSources = {
+      ...sources,
+      downloadProviders: [
+        ...sources.downloadProviders,
+        {
+          key: 'tiktok-ssstik',
+          label: 'TikTok via SSSTik (unofficial third party; opt-in)',
+          kind: 'http',
+          available: true,
+          configured: true,
+        },
+      ],
+    };
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.startsWith('/api/sources')) return jsonResponse(providerSources);
+      if (url.startsWith('/api/analyze')) {
+        return jsonResponse({ series: tiktokSeries, episodes: tiktokEpisodes, extractor: 'tiktok', cached: false });
+      }
+      if (url === '/api/jobs') {
+        return jsonResponse(
+          {
+            job: { id: 'job_tiktok', seriesId: tiktokSeries.id, status: 'pending', totalItems: 2 },
+            items: [],
+            series: { id: tiktokSeries.id, title: tiktokSeries.title, sourceKey: 'tiktok', sourceUrl: '', posterUrl: null },
+          },
+          201,
+        );
+      }
+      return jsonResponse({ items: [], total: 0 });
+    });
+
+    mountApp();
+    await flush();
+    $<HTMLInputElement>('analyze-url').value = tiktokSeries.sourceUrl;
+    $('analyze-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flush();
+
+    const provider = $<HTMLSelectElement>('opt-provider');
+    provider.value = 'tiktok-ssstik';
+    provider.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+    expect($('third-party-warning').hidden).toBe(false);
+    expect($('selection-count').textContent).toBe('2 / 2 selected');
+
+    $('download-all').click();
+    await flush();
+    expect(calls.some((call) => call.url === '/api/jobs')).toBe(false);
+    expect($('job-create-status').textContent).toContain('Confirm rights');
+
+    $<HTMLInputElement>('third-party-consent').checked = true;
+    $('download-all').click();
+    await flush();
+    const jobCall = calls.find((call) => call.url === '/api/jobs');
+    expect(jobCall).toBeDefined();
+    const body = JSON.parse(String(jobCall!.init?.body));
+    expect(body.selection).toEqual({ mode: 'all' });
+    expect(body.options.provider).toBe('tiktok-ssstik');
+    expect(body.options.thirdPartyConsent).toBe(true);
   });
 
 });

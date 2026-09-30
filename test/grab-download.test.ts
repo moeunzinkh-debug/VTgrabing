@@ -164,6 +164,16 @@ describe('progressive downloads transfer the real bytes', () => {
     expect(seen.map((entry) => entry.range)).toEqual(['bytes=0-0', 'bytes=0-3145732']);
   });
 
+  it('infers a playable MIME type when a video host answers application/octet-stream', async () => {
+    const source = payload(32 * 1024, 8);
+    stubSite({ '/generic.mp4': { body: source, type: 'application/octet-stream' } });
+
+    const { result, bytes } = await grab('https://site.source.dev/watch/15', 'https://media.source.dev/generic.mp4');
+
+    expect(bytes).toEqual(source);
+    expect(result.contentType).toBe('video/mp4');
+  });
+
   it('requests one part per chunk and stops at the file size', async () => {
     const source = payload(200 * 1024, 12);
     const seen = stubSite({ '/parts.mp4': { body: source, type: 'video/mp4' } });
