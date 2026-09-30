@@ -37,6 +37,83 @@ const episodes: EpisodeRecord[] = [1, 2, 3].map((index) => ({
   updatedAt: '2026-01-01T00:00:00.000Z',
 }));
 
+/** What the real grabber returns for one page: sizes/qualities read from the host. */
+const grabbedSeries: SeriesRecord = {
+  ...series,
+  sourceKey: 'http-sniff',
+  sourceUrl: 'http://127.0.0.1:8099/',
+  canonicalUrl: 'grab:http://127.0.0.1:8099/',
+  title: 'Big Buck Bunny - grabber fixture',
+  episodeCount: 4,
+  metadata: {
+    diagnostics: ['opened http://127.0.0.1:8099/ (200, text/html)', 'probe: 4 candidate(s) confirmed'],
+    crawledPages: ['/', '/ep/1'],
+    videoCount: 4,
+    encryptedCount: 1,
+  },
+};
+
+const grabbedEpisodes: EpisodeRecord[] = [
+  {
+    id: 'ep_g1',
+    seriesId: 'ser_1',
+    episodeIndex: 1,
+    title: 'Feature presentation',
+    sourceUrl: 'http://127.0.0.1:8099/',
+    durationSeconds: 600,
+    thumbnailUrl: null,
+    streams: [{ quality: '1080p', container: 'mp4', kind: 'progressive', sizeBytes: 7_826_953, url: 'http://127.0.0.1:8099/media/bunny.mp4' }],
+    metadata: { grabbed: true },
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'ep_g2',
+    seriesId: 'ser_1',
+    episodeIndex: 2,
+    title: 'Rabbit chase',
+    sourceUrl: 'http://127.0.0.1:8099/',
+    durationSeconds: 24,
+    thumbnailUrl: null,
+    streams: [
+      { quality: '1080p', container: 'ts', kind: 'hls', segments: 4, sizeBytes: 635_154, url: 'http://127.0.0.1:8099/media/hls/master.m3u8' },
+      { quality: '720p', container: 'ts', kind: 'hls', segments: 4, sizeBytes: 317_577, url: 'http://127.0.0.1:8099/media/hls/720p.m3u8' },
+      { quality: '480p', container: 'ts', kind: 'hls', segments: 4, sizeBytes: 158_788, url: 'http://127.0.0.1:8099/media/hls/480p.m3u8' },
+      { quality: '360p', container: 'ts', kind: 'hls', segments: 4, sizeBytes: 79_394, url: 'http://127.0.0.1:8099/media/hls/360p.m3u8' },
+      { quality: '240p', container: 'ts', kind: 'hls', segments: 4, sizeBytes: 39_697, url: 'http://127.0.0.1:8099/media/hls/240p.m3u8' },
+    ],
+    metadata: { grabbed: true },
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'ep_g3',
+    seriesId: 'ser_1',
+    episodeIndex: 3,
+    title: 'Backstage (protected)',
+    sourceUrl: 'http://127.0.0.1:8099/',
+    durationSeconds: 6,
+    thumbnailUrl: null,
+    streams: [{ quality: '1080p', container: 'ts', kind: 'hls', encrypted: true, url: 'http://127.0.0.1:8099/media/encrypted/master.m3u8' }],
+    metadata: { grabbed: true, encrypted: true },
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'ep_g4',
+    seriesId: 'ser_1',
+    episodeIndex: 4,
+    title: 'Premiere (live)',
+    sourceUrl: 'http://127.0.0.1:8099/',
+    durationSeconds: 6,
+    thumbnailUrl: null,
+    streams: [{ quality: 'source', container: 'ts', kind: 'hls', live: true, url: 'http://127.0.0.1:8099/media/live/media.m3u8' }],
+    metadata: { grabbed: true, live: true },
+    createdAt: '',
+    updatedAt: '',
+  },
+];
+
 const sources = {
   environment: 'test',
   time: '2026-01-01T00:00:00.000Z',
@@ -139,6 +216,9 @@ describe('VTGrab frontend', () => {
     expect(JSON.parse(String(analyzeCall!.init?.body))).toEqual({
       url: 'https://mock.local/series/1',
       refresh: false,
+      // "queue all found" is on by default: analyzing a link puts every video it
+      // found into the download queue in the same request.
+      queueAll: true,
     });
 
     expect($('series-card').hidden).toBe(false);
@@ -156,6 +236,11 @@ describe('VTGrab frontend', () => {
     await flush();
 
     const boxes = () => Array.from($('episode-grid').querySelectorAll('input[type=checkbox]')) as HTMLInputElement[];
+
+    // A finished analyze pre-selects everything it found; start from an empty set.
+    expect($('selection-count').textContent).toBe('3 / 3 selected');
+    $('deselect-all').click();
+    await flush();
 
     // single click
     boxes()[1].click();
@@ -262,4 +347,68 @@ describe('VTGrab frontend', () => {
     expect(errorBox.textContent).toContain('No extractor is able to handle that URL');
     expect($('toasts').textContent).toContain('No extractor is able to handle that URL');
   });
+
+  it('renders a grabbed listing honestly: real sizes, blocked sources, queued job', async () => {
+    const grabbedJob = {
+      job: { id: 'job_grab', seriesId: 'ser_1', status: 'pending', totalItems: 2, completedItems: 0, failedItems: 0, skippedItems: 0, bytes: 0, options: {}, createdAt: '', updatedAt: '', finishedAt: null },
+      items: [],
+      series: { id: 'ser_1', title: 'Big Buck Bunny', sourceKey: 'http-sniff', sourceUrl: '', posterUrl: null },
+    };
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.startsWith('/api/sources')) return jsonResponse(sources);
+      if (url.startsWith('/api/analyze')) {
+        return jsonResponse({ series: grabbedSeries, episodes: grabbedEpisodes, extractor: 'http-sniff', cached: false, job: grabbedJob });
+      }
+      if (url.startsWith('/api/jobs?')) {
+        return jsonResponse({ items: [{ ...grabbedJob.job, seriesTitle: 'Big Buck Bunny', bytes: 0 }], total: 1 });
+      }
+      if (url.startsWith('/api/files')) return jsonResponse({ items: [], total: 0 });
+      return jsonResponse({ items: [], total: 0 });
+    });
+
+    mountApp();
+    await flush();
+
+    $<HTMLInputElement>('analyze-url').value = 'http://127.0.0.1:8099/';
+    $('analyze-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flush();
+
+    const grid = $('episode-grid');
+    const boxes = () => Array.from(grid.querySelectorAll('input[type=checkbox]')) as HTMLInputElement[];
+    expect(grid.querySelectorAll('.episode')).toHaveLength(4);
+
+    // sizes and qualities come from the grabbed streams, not from a fixed template
+    expect(grid.textContent).toContain('7.46 MiB');
+    expect(grid.textContent).toContain('1080p');
+    expect(grid.textContent).toContain('HLS');
+    expect(grid.textContent).toContain('+1 more');
+
+    // the two videos that cannot become a file are listed but locked
+    expect(grid.textContent).toContain('encrypted - not grabbable');
+    expect(grid.textContent).toContain('live - not a file');
+    expect(grid.querySelectorAll('.episode-blocked')).toHaveLength(2);
+    expect(boxes()[2].disabled).toBe(true);
+    expect(boxes()[3].disabled).toBe(true);
+
+    // preselected = everything grabbable, i.e. 4 found minus the 2 blocked ones
+    expect($('selection-count').textContent).toBe('2 / 4 selected');
+    expect(boxes()[0].checked).toBe(true);
+    expect(boxes()[1].checked).toBe(true);
+
+    // the queue note and the diagnostics both explain what happened
+    expect($('queue-note').textContent).toContain('1 encrypted');
+    expect($('queue-note').textContent).toContain('1 live');
+    expect($('analyze-diag').hidden).toBe(false);
+    expect($('analyze-diag-text').textContent).toContain('probe: 4 candidate(s) confirmed');
+
+    // a media preview goes through the guarded proxy, never directly at the host
+    const preview = Array.from(grid.querySelectorAll('a')).find((link) => (link.getAttribute('href') ?? '').startsWith('/api/preview?url='));
+    expect(preview?.getAttribute('href')).toContain(encodeURIComponent('http://127.0.0.1:8099/media/bunny.mp4'));
+
+    // the job analyze created for us shows up in the jobs panel without a reload
+    expect($('jobs-list').textContent).toContain('job_grab');
+  });
+
 });

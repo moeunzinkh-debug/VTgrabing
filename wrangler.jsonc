@@ -57,6 +57,20 @@
     "QUEUE_PUSH_BATCH_SIZE": "100",
     "STALE_ITEM_MINUTES": "20",
     "SOURCE_ALLOWED_HOSTS": "",
-    "PUBLIC_BASE_URL": ""
+    "PUBLIC_BASE_URL": "",
+
+    // ---------------------------------------------------------------------
+    // Real link grabber: `http-sniff` opens the URL you paste and finds every
+    // video on it, `http-stream` downloads those bytes into R2.
+    // GRAB_ALLOWED_HOSTS / GRAB_DENIED_HOSTS restrict which hosts may be
+    // opened (empty = any public host; private/metadata IPs are always
+    // refused outside development). The rest are tuning knobs.
+    // ---------------------------------------------------------------------
+    "GRAB_ENABLED": "true",
+    "GRAB_ALLOWED_HOSTS": "",
+    "GRAB_DENIED_HOSTS": "",
+    "GRAB_MAX_VIDEOS": "200",
+    "GRAB_MAX_VIDEO_BYTES": "3221225472",
+    "GRAB_CHUNK_BYTES": "8388608"
   }
 }

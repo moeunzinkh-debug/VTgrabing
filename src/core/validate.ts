@@ -21,6 +21,8 @@ export const analyzeSchema = z.object({
   url: httpUrl,
   sourceKey: z.string().trim().min(1).max(64).optional(),
   refresh: z.boolean().optional().default(false),
+  /** Queue every video that was found, in the same request. */
+  queueAll: z.boolean().optional().default(false),
 });
 
 const selectionSchema = z.discriminatedUnion('mode', [

@@ -35,6 +35,26 @@ export interface StreamInfo {
   url?: string;
   /** Codec string when known. */
   codecs?: string;
+  /**
+   * How the bytes have to be fetched. Only the real grabber sets this:
+   * `progressive` is one file, `hls`/`dash` are segment lists that get concatenated.
+   */
+  kind?: 'progressive' | 'hls' | 'dash';
+  /** Size in bytes when the host advertised one (Content-Length / manifest math). */
+  sizeBytes?: number;
+  /** Segment count for an adaptive stream. */
+  segments?: number;
+  /** True when the playlist is still running (no `#EXT-X-ENDLIST`): not a file yet. */
+  live?: boolean;
+  /** Duration in seconds, read from the manifest. */
+  durationSeconds?: number;
+  /**
+   * True when the manifest declares encryption (`#EXT-X-KEY`, DRM key systems).
+   * VTGrab refuses to download those; the flag exists so the UI can say why.
+   */
+  encrypted?: boolean;
+  /** Human readable caveat (why something is not grabbable, DRM, live, ...). */
+  note?: string;
 }
 
 export interface SeriesRecord {
@@ -184,7 +204,8 @@ export interface SeriesDetail {
 export interface ProviderDescriptor {
   key: string;
   label: string;
-  kind: 'mock' | 'authorized' | 'remote';
+  /** `http` = the real grabber, `mock` = synthetic dev data, the rest are integrations. */
+  kind: 'mock' | 'authorized' | 'remote' | 'http';
   available: boolean;
   configured: boolean;
   reason?: string;
@@ -207,6 +228,20 @@ export interface SystemStatus {
     defaultContainer: string;
     defaultConcurrency: number;
     queuePushBatchSize: number;
+  };
+  /** Configuration of the real link grabber (`src/grab/*`). */
+  grab?: {
+    enabled: boolean;
+    allowedHosts: string[];
+    deniedHosts: string[];
+    allowPrivateHosts: boolean;
+    maxVideos: number;
+    maxVideoBytes: number;
+    chunkBytes: number;
+    probe: boolean;
+    followEmbeds: boolean;
+    crawl: boolean;
+    maxCrawlPages: number;
   };
 }
 

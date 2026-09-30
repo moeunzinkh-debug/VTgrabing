@@ -19,6 +19,9 @@ function zeroBindingEnv(): Env {
     STALE_ITEM_MINUTES: '20',
     SOURCE_ALLOWED_HOSTS: '',
     PUBLIC_BASE_URL: '',
+    // This scenario is the *mock* zero-config path (no internet in the test
+    // runtime); the real grabber is covered with a stubbed fetch in grab.test.ts.
+    GRAB_ENABLED: 'false',
   } as unknown as Env;
 }
 

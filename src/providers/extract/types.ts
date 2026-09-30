@@ -36,7 +36,7 @@ export interface ExtractedSeries {
 export interface SourceExtractor {
   readonly key: string;
   readonly label: string;
-  readonly kind: 'mock' | 'authorized';
+  readonly kind: 'mock' | 'authorized' | 'http';
   /** Are the required secrets/vars present to use this extractor? */
   isConfigured(env: Env): boolean;
   /** Is this extractor allowed/able to handle the given URL? */

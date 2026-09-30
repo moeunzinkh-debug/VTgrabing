@@ -609,3 +609,65 @@ footer {
 .toast-success {
   border-left-color: var(--ok);
 }
+
+/* ---------- real grabber additions ---------- */
+.h2-sub {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.episode-links {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.episode-links .link {
+  font-size: 12px;
+}
+
+.episode-blocked {
+  opacity: 0.72;
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.episode-blocked:hover {
+  border-color: var(--error);
+}
+
+.diag {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  padding: 8px 12px;
+}
+
+.diag > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  list-style: none;
+}
+
+.diag > summary::before {
+  content: '\25B8  ';
+}
+
+.diag[open] > summary::before {
+  content: '\25BE  ';
+}
+
+.diag pre {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+  overflow-y: auto;
+}

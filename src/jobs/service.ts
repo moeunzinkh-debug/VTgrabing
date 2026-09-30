@@ -8,7 +8,27 @@ import { resolveDownloadProvider } from '../providers/download/registry';
 import type { DownloadProvider } from '../providers/download/types';
 import { sendMessages } from '../queue/messages';
 import type { QueueMessage } from '../queue/messages';
-import type { JobDetail, JobOptions, JobRecord } from '../shared/types';
+import type { EpisodeRecord, JobDetail, JobOptions, JobRecord } from '../shared/types';
+
+/**
+ * Why this video can never become a stored file, if at all:
+ * `encrypted` (DRM / `#EXT-X-KEY`) or `live` (a running playlist with no end).
+ * Both are listed for the user but never queued, because queueing them could only
+ * ever produce a failure.
+ */
+function notFileReason(episode: EpisodeRecord): 'encrypted' | 'live' | null {
+  const streams = episode.streams;
+  if (streams.length === 0) {
+    if (episode.metadata.encrypted === true) return 'encrypted';
+    if (episode.metadata.live === true) return 'live';
+    return null;
+  }
+  if (streams.every((stream) => stream.encrypted === true)) return 'encrypted';
+  if (streams.every((stream) => stream.live === true)) return 'live';
+  // A mix of protected and still-running renditions has nothing downloadable either.
+  if (streams.every((stream) => stream.encrypted === true || stream.live === true)) return 'encrypted';
+  return null;
+}
 import type { CreateJobInput, JobOptionsInput } from '../core/validate';
 
 export function buildJobOptions(env: Env, input: JobOptionsInput = {}): JobOptions {
@@ -54,12 +74,28 @@ export class JobService {
     }
 
     const selectedIds = new Set(resolveSelection(episodes, input.selection).map((pick) => pick.id));
-    const selected = episodes.filter((episode) => selectedIds.has(episode.id));
+    const picked = episodes.filter((episode) => selectedIds.has(episode.id));
+
+    // A grabbed listing can contain protected renditions. Those are never queued:
+    // the grabber does not fetch keys or decrypt, so queueing them would only
+    // produce failures. They are reported instead.
+    const refused = picked
+      .map((episode) => ({ episode, reason: notFileReason(episode) }))
+      .filter((entry): entry is { episode: EpisodeRecord; reason: 'encrypted' | 'live' } => entry.reason !== null);
+    const blocked = new Set(refused.map((entry) => entry.episode.id));
+    const selected = picked.filter((episode) => !blocked.has(episode.id));
     if (selected.length === 0) {
-      throw badRequest('Selection resolved to zero episodes.', {
-        selection: input.selection,
-        available: episodes.length,
-      });
+      throw badRequest(
+        refused.length > 0
+          ? `Every selected video is ${refused.every((entry) => entry.reason === 'live') ? 'a live broadcast' : 'encrypted (DRM / #EXT-X-KEY)'} - there is no finished file for VTGrab to download.`
+          : 'Selection resolved to zero episodes. Run analyze again with refresh.',
+        {
+          selection: input.selection,
+          available: episodes.length,
+          blocked: refused.length,
+          reasons: refused.map((entry) => entry.reason),
+        },
+      );
     }
 
     const options = buildJobOptions(this.env, input.options);
@@ -92,9 +128,20 @@ export class JobService {
     await this.repo.appendEvent({
       jobId: job.id,
       level: 'info',
-      message: `Job created for ${describeSelection(input.selection)} (${selected.length} item(s))`,
+      message: `Job created for ${describeSelection(input.selection)} (${selected.length} item(s)) via ${provider.key}`,
       data: { selection: input.selection, options, provider: provider.key },
     });
+    if (refused.length > 0) {
+      const encrypted = refused.filter((entry) => entry.reason === 'encrypted').length;
+      const live = refused.filter((entry) => entry.reason === 'live').length;
+      const why = [encrypted > 0 ? `${encrypted} encrypted` : '', live > 0 ? `${live} live broadcast(s)` : ''].filter(Boolean).join(', ');
+      await this.repo.appendEvent({
+        jobId: job.id,
+        level: 'warn',
+        message: `Skipped ${refused.length} video(s) that are not downloadable files (${why})`,
+        data: { skipped: refused.map((entry) => ({ id: entry.episode.id, title: entry.episode.title, reason: entry.reason })) },
+      });
+    }
 
     await this.dispatch(job, provider);
     return this.repo.jobDetail(job.id);

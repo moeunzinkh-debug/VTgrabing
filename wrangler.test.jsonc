@@ -48,6 +48,9 @@
     "QUEUE_PUSH_BATCH_SIZE": "100",
     "STALE_ITEM_MINUTES": "20",
     "SOURCE_ALLOWED_HOSTS": "",
-    "PUBLIC_BASE_URL": "https://vtgrab.example.com"
+    "PUBLIC_BASE_URL": "https://vtgrab.example.com",
+    // The automated suite drives the deterministic mock pipeline; the real
+    // grabber (network I/O) is covered in test/grab.test.ts with a stubbed fetch.
+    "GRAB_ENABLED": "false"
   }
 }

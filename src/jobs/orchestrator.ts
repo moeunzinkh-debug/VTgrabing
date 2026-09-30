@@ -36,9 +36,29 @@ export interface StreamCompletionInput {
   providerKey: string;
 }
 
-function pickStreamUrl(episode: EpisodeRecord, quality: string): string | undefined {
-  const exact = episode.streams.find((stream) => stream.quality.toLowerCase() === quality.toLowerCase());
-  return (exact ?? episode.streams[0])?.url;
+/**
+ * The stream that answers the requested quality.
+ * `http-sniff` records the fetch strategy (`kind`) and whether the manifest
+ * declared encryption, so that travels with the URL instead of being re-guessed.
+ */
+export function pickStream(episode: EpisodeRecord, quality: string): EpisodeRecord['streams'][number] | undefined {
+  const wanted = quality.trim().toLowerCase();
+  const byLabel = (stream: EpisodeRecord['streams'][number]): number => {
+    const label = (stream.quality ?? '').toLowerCase();
+    if (label === wanted) return 0;
+    const wantedHeight = Number.parseInt(wanted, 10);
+    const labelHeight = Number.parseInt(label, 10);
+    if (Number.isFinite(wantedHeight) && Number.isFinite(labelHeight)) return 1 + Math.abs(labelHeight - wantedHeight) / 1000;
+    return 2;
+  };
+  const ranked = [...episode.streams].sort((a, b) => byLabel(a) - byLabel(b) || (b.bitrateKbps ?? 0) - (a.bitrateKbps ?? 0));
+  // Prefer a stream the grabber can actually download over a DRM protected one.
+  return ranked.find((stream) => !stream.encrypted && stream.url) ?? ranked.find((stream) => stream.url) ?? ranked[0];
+}
+
+/** Swap the extension of an object key when the provider learned the real container. */
+export function replaceExtension(key: string, container: string): string {
+  return key.replace(/\.[a-z0-9]{1,5}$/i, `.${container.toLowerCase()}`);
 }
 
 export function buildDownloadRequest(
@@ -48,6 +68,7 @@ export function buildDownloadRequest(
   series: SeriesRecord,
   callbackOrigin: string,
 ): DownloadRequest {
+  const selectedStream = pickStream(episode, item.quality);
   return {
     jobItemId: item.id,
     jobId: job.id,
@@ -57,7 +78,9 @@ export function buildDownloadRequest(
     episodeIndex: episode.episodeIndex,
     episodeTitle: episode.title,
     sourceUrl: episode.sourceUrl,
-    streamUrl: pickStreamUrl(episode, item.quality),
+    streamUrl: selectedStream?.url,
+    streamKind: selectedStream?.kind,
+    streamEncrypted: selectedStream?.encrypted,
     quality: item.quality,
     container: item.container,
     objectKey: item.objectKey,
@@ -246,15 +269,59 @@ export async function runDownloadJobItem(
     message: `Downloading episode ${episode.episodeIndex} at ${item.quality} via ${provider.key} (attempt ${attempt})`,
   });
 
+  // Bytes streamed by the provider -> throttled D1 progress updates.
+  let lastProgressWrite = 0;
+  let lastProgressValue = 5;
+  const onProgress: NonNullable<DownloadRequest['onProgress']> = async (update) => {
+    const ratio = update.totalBytes && update.totalBytes > 0 ? update.bytes / update.totalBytes : null;
+    const percent =
+      typeof update.percent === 'number'
+        ? update.percent
+        : ratio !== null
+          ? Math.round(ratio * 100)
+          : Math.min(90, lastProgressValue + 1);
+    const value = Math.max(5, Math.min(99, percent));
+    const now = Date.now();
+    if (now - lastProgressWrite < 1500 && Math.abs(value - lastProgressValue) < 5) return;
+    lastProgressWrite = now;
+    lastProgressValue = value;
+    await repo.updateJobItem(item.id, { progress: value, bytes: update.bytes });
+  };
+
   try {
     const result = await provider.start(
-      buildDownloadRequest(item, job, episode, series, callbackOrigin(env)),
+      {
+        ...buildDownloadRequest(item, job, episode, series, callbackOrigin(env)),
+        onProgress,
+      },
       env,
     );
 
     if (result.kind === 'stream') {
+      // The grabber only knows the true container/quality once it has read the
+      // manifest (HLS may carry TS or fMP4 segments), so reconcile the row here.
+      let storedItem = item;
+      const container = result.container?.toLowerCase();
+      const quality = result.quality?.trim();
+      const patch: { container?: string; quality?: string; objectKey?: string } = {};
+      if (container && container !== item.container) {
+        patch.container = container;
+        patch.objectKey = replaceExtension(item.objectKey, container);
+      }
+      if (quality && quality !== item.quality) patch.quality = quality;
+      if (Object.keys(patch).length > 0) {
+        await repo.updateJobItem(item.id, patch);
+        storedItem = { ...item, ...patch, objectKey: patch.objectKey ?? item.objectKey };
+        await repo.appendEvent({
+          jobId: job.id,
+          jobItemId: item.id,
+          level: 'info',
+          message: `Source is ${storedItem.quality} ${storedItem.container}; storing it as ${storedItem.objectKey}`,
+        });
+      }
+
       await completeJobItemWithStream(env, repo, {
-        item,
+        item: storedItem,
         stream: result.stream,
         contentType: result.contentType,
         contentLength: result.contentLength,
