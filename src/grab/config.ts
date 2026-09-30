@@ -52,8 +52,10 @@ export interface GrabConfig {
   userAgent: string;
 }
 
+// Plain browser UA on purpose: a custom product token (e.g. "VTGrab/1.0") is a
+// self-declared bot marker and gets the Worker 403-bot-checked at TikTok's edge.
 export const DEFAULT_USER_AGENT =
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 VTGrab/1.0';
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 /** Minimum R2 accepts for a multipart part is 5 MiB; keep chunks well above that. */
 export const MIN_CHUNK_BYTES = 5 * 1024 * 1024;
