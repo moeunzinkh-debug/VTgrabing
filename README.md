@@ -266,11 +266,18 @@ as extractor `tiktok`, ahead of the generic `http-sniff`.
 
 * **Resolve.** A short link is followed hop by hop; every hop must stay on `tiktok.com`
   and pass the normal host policy, so a short link can never steer the Worker elsewhere.
-  Tracking parameters (`_r`, `u_code`, `share_*`, ...) are dropped.
+  Tracking parameters (`_r`, `u_code`, `share_*`, ...) are dropped. TikTok's edge often
+  bot-checks server-side redirect fetches (403, no `Location`); when that happens the
+  hop is recorded in the diagnostics, and if the hop answers 200 with an interstitial
+  the long URL is sniffed out of the page (`og:url`, `rel=canonical`, embed attributes,
+  first absolute video URL).
 * **Read.** The public HTML's embedded page data (`__UNIVERSAL_DATA_FOR_REHYDRATION__`),
-  then Open Graph tags, then the public `oembed` endpoint if the page is walled. No
-  login, no cookies, **no attempt to get past a captcha / bot check**: if TikTok returns
-  nothing public, the error says so.
+  then Open Graph tags, then the public `oembed` endpoint if the page is walled. The
+  video id is recovered from whatever names the video — `og:url` / canonical on the
+  page, `data-video-id` / `cite` / anchors inside the oEmbed `html` field — so a short
+  link that never redirected still lists. No login, no cookies, **no attempt to get
+  past a captcha / bot check**: if TikTok returns nothing public, the error says so and
+  suggests pasting the long `www.tiktok.com/@…/video/…` address.
 * **Classify.** *mini-drama* when the page labels a series/drama itself, or enough of
   these add up: a specific drama hashtag (`#minidrama`, `#shortmax`, `#reelshort`, ...),
   an episode marker in the caption (`EP 12/60`, `Episode 5`, `Part 3`, `Tập 9`,

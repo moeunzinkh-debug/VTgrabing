@@ -59,6 +59,68 @@ export function canonicalVideoUrl(username: string | undefined, videoId: string)
     : `https://www.tiktok.com/@_/video/${videoId}`;
 }
 
+/** A video id / username recovered from HTML that names the video. */
+export interface TikTokVideoRef {
+  id: string;
+  username?: string;
+  url: string;
+}
+
+function linkCanonical(html: string): string | undefined {
+  const patterns = [
+    /<link[^>]+rel=["']canonical["'][^>]*href=["']([^"']+)["']/i,
+    /<link[^>]+href=["']([^"']+)["'][^>]*rel=["']canonical["']/i,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(html);
+    if (match?.[1]) return decodeEntities(match[1]).trim() || undefined;
+  }
+  return undefined;
+}
+
+function refFromUrl(raw: string | undefined): TikTokVideoRef | null {
+  if (!raw) return null;
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (!isTikTokHost(url.hostname)) return null;
+  const parts = parseTikTokUrl(url);
+  if ((parts.kind !== 'video' && parts.kind !== 'photo') || !parts.videoId) return null;
+  return { id: parts.videoId, username: parts.username, url: canonicalVideoUrl(parts.username, parts.videoId) };
+}
+
+/**
+ * Recover which video a page / embed snippet is about when the request URL alone does
+ * not say so (short link that never redirected, oEmbed response, meta-tag fallback):
+ * explicit canonical pointers first (og:url, al:web:url, rel=canonical, embed `cite`),
+ * then embed attributes (`data-video-id`), then the first absolute TikTok video URL in
+ * the text (short-link interstitials and the oEmbed `html` field carry the long URL in
+ * JS strings / anchors).
+ */
+export function findVideoRefInHtml(html: string): TikTokVideoRef | null {
+  if (!html) return null;
+  for (const raw of [metaContent(html, 'og:url'), metaContent(html, 'al:web:url'), linkCanonical(html)]) {
+    const ref = refFromUrl(raw);
+    if (ref) return ref;
+  }
+  const cite = /cite\s*=\s*["']([^"']+)["']/i.exec(html);
+  const cited = refFromUrl(cite?.[1] ? decodeEntities(cite[1]) : undefined);
+  if (cited) return cited;
+  const dataId = /data-video-id\s*=\s*["']?(\d{6,25})["'\s>]/i.exec(html);
+  if (dataId?.[1]) {
+    const username = /data-username\s*=\s*["']([^"']+)["']/i.exec(html)?.[1];
+    return { id: dataId[1], username, url: canonicalVideoUrl(username, dataId[1]) };
+  }
+  for (const match of html.matchAll(/https?:\/\/[^\s"'<>\\)]+/g)) {
+    const found = refFromUrl(decodeEntities(match[0]));
+    if (found) return found;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // text helpers: Khmer digits, hashtags, episode markers
 // ---------------------------------------------------------------------------
@@ -365,10 +427,13 @@ export function parseVideoPage(html: string, pageUrl: URL): TikTokVideoInfo | nu
 
   const caption = metaContent(html, 'og:description') ?? metaContent(html, 'description') ?? metaContent(html, 'og:title');
   if (caption) {
+    // The request URL may be a short link that never redirected; the page's own
+    // canonical pointers usually still name the video.
+    const ref = urlParts.videoId ? null : findVideoRefInHtml(html);
     return {
-      id: urlParts.videoId,
+      id: urlParts.videoId ?? ref?.id,
       caption,
-      username: urlParts.username,
+      username: urlParts.username ?? ref?.username,
       hashtags: hashtagsOf(caption),
       cover: metaContent(html, 'og:image'),
       origin: 'meta',
@@ -384,11 +449,15 @@ export function parseOEmbed(json: unknown, pageUrl: URL): TikTokVideoInfo | null
   const caption = str(record.title) ?? '';
   const authorUrl = str(record.author_url);
   const parts = parseTikTokUrl(pageUrl);
+  // TikTok's response carries no id field of its own; the embed snippet in `html`
+  // names the video (`data-video-id`, `cite`, anchors) even when `url` was a short
+  // link the tool could not redirect-resolve.
+  const refs = findVideoRefInHtml(str(record.html) ?? '');
   const username =
-    str(record.author_unique_id) ?? (authorUrl ? /@([^/?#]+)/.exec(authorUrl)?.[1] : undefined) ?? parts.username;
+    str(record.author_unique_id) ?? (authorUrl ? /@([^/?#]+)/.exec(authorUrl)?.[1] : undefined) ?? refs?.username ?? parts.username;
   if (!caption && !username) return null;
   return {
-    id: str(record.embed_product_id) ?? parts.videoId,
+    id: str(record.embed_product_id) ?? refs?.id ?? parts.videoId,
     caption,
     username,
     nickname: str(record.author_name),

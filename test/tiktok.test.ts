@@ -203,6 +203,30 @@ describe('mini-drama or normal video', () => {
   it('returns null for a page with nothing in it (bot check)', () => {
     expect(parseVideoPage('<html><title>Verify</title></html>', new URL('https://www.tiktok.com/@a/video/7300000000000000012'))).toBeNull();
   });
+
+  it('recovers the video id from the oEmbed html field when the url is a short link', () => {
+    // TikTok's real oEmbed response carries no id field; the embed snippet names the video.
+    const html =
+      `<blockquote class="tiktok-embed" cite="https://www.tiktok.com/@dramahouse/video/${DRAMA_ID}" ` +
+      `data-video-id="${DRAMA_ID}"><section><a href="https://www.tiktok.com/@dramahouse?referer=embed">@dramahouse</a></section></blockquote>`;
+    const oembed = parseOEmbed(
+      { title: 'Secret Wife EP 4 #minidrama', author_name: 'Drama House', author_url: 'https://www.tiktok.com/@dramahouse', thumbnail_url: 'https://x.example/t.jpg', html },
+      new URL('https://vt.tiktok.com/ZSbADyPoy/'),
+    );
+    expect(oembed?.id).toBe(DRAMA_ID);
+    expect(oembed?.username).toBe('dramahouse');
+    expect(oembed?.origin).toBe('oembed');
+  });
+
+  it('recovers the video id from og:url when the page url is an unresolved short link', () => {
+    const html =
+      `<meta property="og:url" content="https://www.tiktok.com/@dramahouse/video/${DRAMA_ID}">` +
+      '<meta property="og:description" content="Secret Wife EP 4 #minidrama #shortmax">';
+    const meta = parseVideoPage(html, new URL('https://vt.tiktok.com/ZSbADyPoy/'));
+    expect(meta?.origin).toBe('meta');
+    expect(meta?.id).toBe(DRAMA_ID);
+    expect(meta?.username).toBe('dramahouse');
+  });
 });
 
 describe('short URL resolution', () => {
@@ -235,6 +259,27 @@ describe('short URL resolution', () => {
     const resolved = await resolveShortUrl(new URL(`https://www.tiktok.com/@a/video/${DRAMA_ID}?lang=en`), cfg, undefined, new Budget(10), () => undefined);
     expect(resolved.search).toBe('');
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('sniffs the long URL out of a 200 interstitial page (no redirect hop)', async () => {
+    const html =
+      `<html><head><meta property="og:url" content="https://www.tiktok.com/@dramahouse/video/${DRAMA_ID}"></head>` +
+      '<body>Opening TikTok…</body></html>';
+    vi.stubGlobal('fetch', async () => new Response(html, { status: 200, headers: { 'content-type': 'text/html' } }));
+    const resolved = await resolveShortUrl(new URL('https://vt.tiktok.com/ZSbADyPoy/'), cfg, undefined, new Budget(10), () => undefined);
+    expect(resolved.toString()).toBe(`https://www.tiktok.com/@dramahouse/video/${DRAMA_ID}`);
+  });
+
+  it('reports a bot-checked hop in the trace instead of pretending it resolved', async () => {
+    const trace: string[] = [];
+    vi.stubGlobal('fetch', async () => new Response('captcha', { status: 403 }));
+    const resolved = await resolveShortUrl(new URL('https://vt.tiktok.com/ZSbADyPoy/'), cfg, undefined, new Budget(10), (line) => trace.push(line));
+    expect(resolved.toString()).toBe('https://vt.tiktok.com/ZSbADyPoy/');
+    expect(trace.join('\n')).toMatch(/HTTP 403/);
+  });
+
+  it('does not self-declare a bot in the default user agent', () => {
+    expect(grabConfig(env()).userAgent).not.toMatch(/vtgrab/i);
   });
 });
 
@@ -294,6 +339,35 @@ describe('TikTokExtractor end to end (stubbed network)', () => {
     expect(series.metadata?.contentKind).toBe('mini-drama');
     expect(series.metadata?.currentEpisodeNumber).toBe(4);
     expect(series.episodes).toHaveLength(1);
+    expect(seen.some((entry) => entry.includes('/oembed?url='))).toBe(true);
+  });
+
+  it('production repro: bot-checked short link + walled page still lists via oEmbed html', async () => {
+    // What TikTok's edge actually does to a server-side tool today: 403 on the short
+    // link hop and on the page, while the public oEmbed endpoint still answers and
+    // names the video inside its `html` embed snippet.
+    const html =
+      `<blockquote class="tiktok-embed" cite="https://www.tiktok.com/@dramahouse/video/${DRAMA_ID}" ` +
+      `data-video-id="${DRAMA_ID}"><section></section></blockquote>`;
+    const seen = stubTikTok((url) => {
+      if (url.hostname === 'vt.tiktok.com') return new Response('captcha', { status: 403 });
+      if (url.pathname === '/oembed') {
+        return Response.json({
+          title: 'Secret Wife EP 4 #minidrama #reelshort',
+          author_name: 'Drama House',
+          author_url: 'https://www.tiktok.com/@dramahouse',
+          thumbnail_url: 'https://x.example/t.jpg',
+          html,
+        });
+      }
+      return new Response('captcha', { status: 403 });
+    });
+    const series = await new TikTokExtractor().extract(new URL('https://vt.tiktok.com/ZSbADyPoy/'), env());
+    expect(series.episodes).toHaveLength(1);
+    expect(series.episodes[0].metadata?.videoId).toBe(DRAMA_ID);
+    expect(series.metadata?.contentKind).toBe('mini-drama');
+    expect(series.metadata?.dataOrigin).toBe('oembed');
+    expect(series.metadata?.resolvedUrl).toBe(`https://www.tiktok.com/@dramahouse/video/${DRAMA_ID}`);
     expect(seen.some((entry) => entry.includes('/oembed?url='))).toBe(true);
   });
 

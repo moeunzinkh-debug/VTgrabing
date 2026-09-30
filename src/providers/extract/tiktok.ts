@@ -8,6 +8,7 @@ import { Budget, grabFetch, readTextLimited } from '../../grab/net';
 import {
   analyzeVideo,
   canonicalVideoUrl,
+  findVideoRefInHtml,
   isShortTikTokUrl,
   isTikTokHost,
   parseOEmbed,
@@ -68,8 +69,8 @@ export class TikTokExtractor implements SourceExtractor {
     };
 
     // ---- 1. resolve the short URL -----------------------------------------
-    const resolved = await resolveShortUrl(url, cfg, signal, budget, trace);
-    const parts = parseTikTokUrl(resolved);
+    let resolved = await resolveShortUrl(url, cfg, signal, budget, trace);
+    let parts = parseTikTokUrl(resolved);
     if (parts.kind === 'profile') {
       throw badRequest(
         'This is a profile link, not a video. Paste the link of one episode (or the series/playlist link).',
@@ -94,13 +95,30 @@ export class TikTokExtractor implements SourceExtractor {
     }
     trace(`public data from: ${info.origin}`);
 
+    // The short link may have been unresolvable (bot check) while the public data
+    // still names the video: adopt the discovered id so the listing is complete and
+    // downstream metadata shows the long URL.
+    if (info.id && (isShortTikTokUrl(resolved) || parseTikTokUrl(resolved).kind === 'unknown')) {
+      resolved = new URL(canonicalVideoUrl(info.username, info.id));
+      parts = parseTikTokUrl(resolved);
+      trace(`video id recovered from ${info.origin}: ${info.id}${info.username ? ` (@${info.username})` : ''}`);
+    }
+
     // ---- 3-4. classify, title, episode number, episode list ---------------
     const analysis = analyzeVideo(info, parts.username);
     trace(
       `verdict: ${analysis.kind} (${analysis.classification.confidence} confidence) - ${analysis.classification.signals.join('; ')}`,
     );
     if (analysis.episodes.length === 0) {
-      throw badRequest('Could not identify a video id in this link.', { resolvedUrl: resolved.toString(), diagnostics });
+      const unresolved = isShortTikTokUrl(resolved) || parseTikTokUrl(resolved).kind === 'unknown';
+      throw badRequest(
+        unresolved
+          ? 'Could not identify a video id in this link: TikTok refused to resolve the short link for a server-side ' +
+            'tool (bot check) and no public data names the video. Open the link once in a browser and paste the ' +
+            'long address it lands on (www.tiktok.com/@…/video/…).'
+          : 'Could not identify a video id in this link.',
+        { resolvedUrl: resolved.toString(), diagnostics },
+      );
     }
     return toSeries(analysis, info, url, resolved, diagnostics);
   }
@@ -162,26 +180,46 @@ export async function resolveShortUrl(
     } catch (error) {
       throw badRequest(`Could not resolve the short link: ${error instanceof Error ? error.message : String(error)}`);
     }
-    void response.body?.cancel().catch(() => undefined);
     const location = response.headers.get('location');
-    if (!location || response.status < 300 || response.status >= 400) {
-      // Not a redirect: this is the final page (already the long URL).
+    if (location && response.status >= 300 && response.status < 400) {
+      void response.body?.cancel().catch(() => undefined);
+      let next: URL;
+      try {
+        next = new URL(location, current);
+      } catch {
+        throw badRequest(`The short link redirected to an invalid location "${location.slice(0, 200)}"`);
+      }
+      if (!isTikTokHost(next.hostname)) {
+        throw badRequest(`The short link redirects to ${next.hostname}, which is not TikTok. Refusing to follow it.`);
+      }
+      trace(`short link hop ${hop + 1}: ${current.host}${current.pathname} -> ${next.host}${next.pathname}`);
+      next = safeUrl(next, cfg).url;
+      // A long video URL is the goal; stop as soon as we have one.
+      if (parseTikTokUrl(next).kind !== 'unknown' && !isShortTikTokUrl(next)) return stripTracking(next);
+      current = next;
+      continue;
+    }
+    if (response.status >= 400) {
+      // No redirect and no page: TikTok's edge bot-checked the hop. Say so in the
+      // diagnostics instead of silently pretending the short URL was the destination.
+      trace(`short link hop returned HTTP ${response.status} with no redirect (TikTok bot check?) - nothing left to follow`);
+      void response.body?.cancel().catch(() => undefined);
       return stripTracking(current);
     }
-    let next: URL;
-    try {
-      next = new URL(location, current);
-    } catch {
-      throw badRequest(`The short link redirected to an invalid location "${location.slice(0, 200)}"`);
+    // A 2xx final page. If it is still a short/unknown URL, the destination may only
+    // exist inside the HTML (interstitial JS redirect, og:url) - sniff it out.
+    if (isShortTikTokUrl(current) || parseTikTokUrl(current).kind === 'unknown') {
+      const body = await readTextLimited(response, Math.min(cfg.maxPageBytes, 512 * 1024), current);
+      const ref = findVideoRefInHtml(body.text);
+      if (ref) {
+        trace(`short link final page names the video directly: ${ref.url}`);
+        return new URL(ref.url);
+      }
+      trace(`short link final page (HTTP ${response.status}) carries no long URL`);
+    } else {
+      void response.body?.cancel().catch(() => undefined);
     }
-    if (!isTikTokHost(next.hostname)) {
-      throw badRequest(`The short link redirects to ${next.hostname}, which is not TikTok. Refusing to follow it.`);
-    }
-    trace(`short link hop ${hop + 1}: ${current.host}${current.pathname} -> ${next.host}${next.pathname}`);
-    next = safeUrl(next, cfg).url;
-    // A long video URL is the goal; stop as soon as we have one.
-    if (parseTikTokUrl(next).kind !== 'unknown' && !isShortTikTokUrl(next)) return stripTracking(next);
-    current = next;
+    return stripTracking(current);
   }
   throw badRequest(`Too many redirects (>${cfg.maxRedirects}) while resolving the short link.`);
 }
