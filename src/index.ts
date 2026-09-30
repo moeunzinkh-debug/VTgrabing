@@ -32,16 +32,31 @@ const worker: ExportedHandler<Env, QueueMessage> = {
   async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
     if (pathname.startsWith('/api/')) {
+      const storageReady = Boolean(env.DB && env.FILES && env.JOB_QUEUE);
+      if (!storageReady && pathname !== '/api/health') {
+        return Response.json(
+          {
+            ok: false,
+            error: {
+              code: 'storage_not_configured',
+              message: 'D1 / R2 / Queue bindings are not configured on this Worker.',
+            },
+          },
+          { status: 503, headers: { 'cache-control': 'no-store' } },
+        );
+      }
       return app.fetch(request, env, ctx);
     }
     return serveFrontend(request, env);
   },
 
   async queue(batch, env) {
+    if (!env.DB) return;
     await handleQueue(batch, env);
   },
 
   async scheduled(_event, env) {
+    if (!env.DB) return;
     const result = await runMaintenance(env, new Repository(env));
     console.log(
       `[vtgrab] maintenance: polled=${result.polled} completed=${result.completed} failed=${result.failed}`,

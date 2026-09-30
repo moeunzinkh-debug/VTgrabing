@@ -23,61 +23,9 @@
     "run_worker_first": true
   },
 
-  // ---------------------------------------------------------------------------
-  // D1 - relational metadata (series, episodes, jobs, job_items, files, events)
-  // ---------------------------------------------------------------------------
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "vtgrab-db",
-      // Template value. Replace it with the real ID from `npx wrangler d1 create
-      // vtgrab-db` (or `npx wrangler d1 list`) before deploying - Cloudflare
-      // rejects the all-zero placeholder with:
-      //   Invalid database UUID (00000000-0000-0000-0000-000000000000) [code: 80000222]
-      // `npm run deploy` runs scripts/check-deploy-config.mjs first and explains this.
-      "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations"
-    }
-  ],
-
-  // ---------------------------------------------------------------------------
-  // R2 - completed media objects
-  // ---------------------------------------------------------------------------
-  "r2_buckets": [
-    {
-      "binding": "FILES",
-      "bucket_name": "vtgrab-files"
-    }
-  ],
-
-  // ---------------------------------------------------------------------------
-  // Queues - job orchestration
-  // ---------------------------------------------------------------------------
-  "queues": {
-    "producers": [
-      {
-        "binding": "JOB_QUEUE",
-        "queue": "vtgrab-jobs"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "vtgrab-jobs",
-        "max_batch_size": 10,
-        "max_batch_timeout": 5,
-        "max_retries": 3,
-        "max_concurrency": 4,
-        "retry_delay": 30
-      }
-    ]
-  },
-
-  // ---------------------------------------------------------------------------
-  // Cron - maintenance: expire stale downloads, re-poll deferred provider jobs
-  // ---------------------------------------------------------------------------
-  "triggers": {
-    "crons": ["*/5 * * * *"]
-  },
+  // Like the Recap-ai worker: no D1 / R2 / Queue bindings, so a GitHub push
+  // deploys with nothing to create in the Cloudflare dashboard first.
+  // API routes that need storage answer 503 until bindings are added back.
 
   "vars": {
     "ENVIRONMENT": "production",
