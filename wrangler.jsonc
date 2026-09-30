@@ -12,6 +12,11 @@
   // Static single page frontend built by `npm run build:client` (Vite) into ./dist
   // The Worker runs first and serves the Vite bundle from `env.ASSETS`, with an
   // explicit SPA fallback (see src/index.ts).
+  //
+  // ./dist is git-ignored, so it only exists after a build. Cloudflare Workers
+  // Builds therefore needs a *build command* (`npm run build`) in front of the
+  // deploy command, otherwise the deploy fails with:
+  //   The directory specified by the "assets.directory" field ... does not exist
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
@@ -25,9 +30,11 @@
     {
       "binding": "DB",
       "database_name": "vtgrab-db",
-      // Replace this template value with the real ID from `wrangler d1 list`
-      // before deploying. Cloudflare Workers Builds cannot deploy a D1 binding
-      // that points to this all-zero placeholder.
+      // Template value. Replace it with the real ID from `npx wrangler d1 create
+      // vtgrab-db` (or `npx wrangler d1 list`) before deploying - Cloudflare
+      // rejects the all-zero placeholder with:
+      //   Invalid database UUID (00000000-0000-0000-0000-000000000000) [code: 80000222]
+      // `npm run deploy` runs scripts/check-deploy-config.mjs first and explains this.
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
