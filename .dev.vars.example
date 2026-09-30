@@ -3,12 +3,37 @@
 ENVIRONMENT=development
 MOCK_ENABLED=true
 
-# Authorized source (extractor) - leave empty to use the mock catalog.
+# ---------------------------------------------------------------------------
+# Real link grabber.
+#   Analyze opens the URL you paste, finds every video source on the page
+#   (and on the episode pages it links to), and the download provider streams
+#   the real bytes into R2.
+#
+#   GRAB_ENABLED=false              only the mock catalog / mock downloader
+#   GRAB_ALLOWED_HOSTS=a.com,b.com  restrict which hosts may be opened
+#                                   (recommended for a public deployment)
+#   GRAB_ALLOW_PRIVATE_HOSTS=true   also allow 127.0.0.1 / LAN targets, which is
+#                                   what local fixture servers need. NEVER enable
+#                                   this in production (SSRF), and it is ignored
+#                                   when ENVIRONMENT=production.
+#   GRAB_MAX_VIDEO_BYTES            hard cap per downloaded object
+#   GRAB_CHUNK_BYTES                Range chunk = one R2 multipart part
+# ---------------------------------------------------------------------------
+GRAB_ENABLED=true
+GRAB_ALLOWED_HOSTS=
+GRAB_DENIED_HOSTS=
+GRAB_ALLOW_PRIVATE_HOSTS=false
+GRAB_MAX_VIDEOS=200
+GRAB_MAX_VIDEO_BYTES=3221225472
+GRAB_CHUNK_BYTES=8388608
+
+# Authorized source (extractor) - leave empty to use the real link grabber.
 SOURCE_API_BASE_URL=
 SOURCE_API_TOKEN=
 SOURCE_ALLOWED_HOSTS=
 
-# Authorized download service - leave empty to use the mock downloader.
+# Authorized download service - optional. When set it wins over the built-in
+# `http-stream` provider for new jobs (pick a provider per job in the UI).
 DOWNLOAD_SERVICE_URL=
 DOWNLOAD_SERVICE_TOKEN=
 DOWNLOAD_CALLBACK_SECRET=local-dev-callback-secret

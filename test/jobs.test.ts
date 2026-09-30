@@ -245,10 +245,15 @@ describe('GET /api/jobs', () => {
     const sources = await requestJson<{
       downloadProviders: Array<{ key: string; kind: string; available: boolean }>;
       limits: { maxAttempts: number; defaultConcurrency: number };
+      grab?: { enabled: boolean };
     }>('/api/sources');
-    expect(sources.downloadProviders.map((item) => item.key)).toEqual(['remote', 'mock']);
+    expect(sources.downloadProviders.map((item) => item.key)).toEqual(['remote', 'http-stream', 'mock']);
     expect(sources.downloadProviders.find((item) => item.key === 'mock')?.available).toBe(true);
     expect(sources.downloadProviders.find((item) => item.key === 'remote')?.available).toBe(false);
+    // The test deployment turns the real grabber off (GRAB_ENABLED=false) so the
+    // mock pipeline is deterministic; a default deployment has it on.
+    expect(sources.downloadProviders.find((item) => item.key === 'http-stream')?.available).toBe(false);
+    expect(sources.grab?.enabled).toBe(false);
     expect(sources.limits.maxAttempts).toBe(3);
   });
 });

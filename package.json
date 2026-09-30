@@ -20,6 +20,8 @@
     "deploy": "npm run build && wrangler deploy",
     "predeploy": "node scripts/check-deploy-config.mjs",
     "cf:check": "node scripts/check-deploy-config.mjs",
+    "fixture:site": "node scripts/fixture-site.mjs",
+    "verify:grab": "node scripts/verify-grab-e2e.mjs",
     "cf:provision": "node scripts/provision-cloudflare.mjs",
     "db:create": "wrangler d1 create vtgrab-db",
     "db:migrate:local": "wrangler d1 migrations apply vtgrab-db-test --local --config wrangler.test.jsonc",

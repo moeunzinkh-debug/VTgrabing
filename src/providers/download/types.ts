@@ -1,4 +1,5 @@
 import type { Env } from '../../env';
+import type { DownloadProgressUpdate } from '../../grab/fetch-stream';
 import type { ProviderDescriptor } from '../../shared/types';
 
 export interface DownloadRequest {
@@ -13,6 +14,10 @@ export interface DownloadRequest {
   sourceUrl: string;
   /** Direct stream URL for the requested quality, when the source exposes one. */
   streamUrl?: string;
+  /** How that URL has to be fetched (set by the real grabber). */
+  streamKind?: 'progressive' | 'hls' | 'dash';
+  /** True when the recorded manifest declared encryption/DRM. */
+  streamEncrypted?: boolean;
   quality: string;
   container: string;
   objectKey: string;
@@ -22,6 +27,11 @@ export interface DownloadRequest {
    * Overridden by `DOWNLOAD_CALLBACK_URL` when set.
    */
   callbackOrigin: string;
+  /**
+   * Live progress hook for providers that stream inside the Worker. It is a
+   * function on purpose (never serialized): HTTP providers simply ignore it.
+   */
+  onProgress?: (update: DownloadProgressUpdate) => void | Promise<void>;
 }
 
 /**
@@ -37,6 +47,14 @@ export type DownloadResult =
       contentType: string;
       /** Present when the provider can hash the full payload (small objects). */
       checksumSha256?: string;
+      /**
+       * Actual container of the bytes. The real grabber knows only after reading
+       * the manifest (an HLS playlist can hold TS *or* fMP4 segments), so the
+       * orchestrator renames the object key when this differs from what was asked.
+       */
+      container?: string;
+      /** Actual quality label, e.g. the HLS variant that was selected. */
+      quality?: string;
     }
   | {
       kind: 'deferred';
@@ -57,7 +75,7 @@ export interface RemoteJobStatus {
 export interface DownloadProvider {
   readonly key: string;
   readonly label: string;
-  readonly kind: 'mock' | 'remote';
+  readonly kind: 'mock' | 'remote' | 'http';
   isConfigured(env: Env): boolean;
   describe(env: Env): ProviderDescriptor;
   start(request: DownloadRequest, env: Env): Promise<DownloadResult>;

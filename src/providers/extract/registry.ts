@@ -2,10 +2,21 @@ import { unsupportedSource } from '../../core/errors';
 import type { Env } from '../../env';
 import type { ProviderDescriptor } from '../../shared/types';
 import { AuthorizedHttpExtractor } from './authorized';
+import { HttpSniffExtractor } from './http-sniff';
 import { MockExtractor } from './mock';
 import type { SourceExtractor } from './types';
 
-const REGISTRY: SourceExtractor[] = [new AuthorizedHttpExtractor(), new MockExtractor()];
+/**
+ * Resolution order for `POST /api/analyze`:
+ *   1. `authorized-http` - an operator configured catalog API (explicit opt-in)
+ *   2. `http-sniff`      - the real link grabber: open the URL, find the videos
+ *   3. `mock`            - synthetic data, development/tests only
+ */
+const REGISTRY: SourceExtractor[] = [
+  new AuthorizedHttpExtractor(),
+  new HttpSniffExtractor(),
+  new MockExtractor(),
+];
 
 export function listExtractors(): SourceExtractor[] {
   return REGISTRY;

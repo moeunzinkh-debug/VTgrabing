@@ -11,6 +11,11 @@ import {
   parseOrThrow,
 } from '../core/validate';
 import type { Env } from '../env';
+import { baseHeaders, grabConfig } from '../grab/config';
+import { safeUrl } from '../grab/guard';
+import { Budget, grabFetch } from '../grab/net';
+import { isManifestContentType } from '../grab/manifests';
+import { isMediaContentType } from '../grab/media-types';
 import {
   defaultConcurrency,
   fileUrlTtlSeconds,
@@ -25,7 +30,7 @@ import { completeJobItemWithStream, finalizeJob, runMaintenance } from '../jobs/
 import { callbackPayload, verifySignature } from '../providers/signature';
 import { ensureRuntimeEnv, withAutoSchema } from '../runtime/fallbacks';
 import type { WaitUntilContext } from '../runtime/fallbacks';
-import type { EpisodeRecord, SeriesRecord } from '../shared/types';
+import type { EpisodeRecord, JobDetail, SeriesRecord } from '../shared/types';
 
 export const app = new Hono<{ Bindings: Env }>();
 
@@ -83,13 +88,43 @@ app.get('/api/sources', (context) => {
       defaultConcurrency: defaultConcurrency(env),
       queuePushBatchSize: queuePushBatchSize(env),
     },
+    grab: describeGrab(env),
   });
 });
+
+/** What the real grabber is allowed to do on this deployment (for the UI). */
+function describeGrab(env: Env) {
+  const cfg = grabConfig(env);
+  return {
+    enabled: cfg.enabled,
+    allowedHosts: cfg.allowlist,
+    deniedHosts: cfg.denylist,
+    allowPrivateHosts: cfg.allowPrivateHosts,
+    maxVideos: cfg.maxVideos,
+    maxVideoBytes: cfg.maxVideoBytes,
+    chunkBytes: cfg.chunkBytes,
+    probe: cfg.probe,
+    followEmbeds: cfg.followEmbeds,
+    crawl: cfg.crawl,
+    maxCrawlPages: cfg.maxCrawlPages,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Analyze
 // ---------------------------------------------------------------------------
 
+/**
+ * Analyze a link.
+ *
+ * For the real grabber (`http-sniff`) this is the whole "open the URL, find the
+ * videos" step: the Worker fetches the page, sniffs every media source it can see
+ * (including embedded players and linked episode pages), confirms each one against
+ * the media host and stores the result as a series + episodes in D1.
+ *
+ * `queueAll: true` additionally creates the download job immediately, so one click
+ * puts every found video into the queue.
+ */
 app.post('/api/analyze', async (context) => {
   const env = context.env;
   const repo = new Repository(env);
@@ -100,17 +135,30 @@ app.post('/api/analyze', async (context) => {
     const cached = await repo.getSeriesBySourceUrl(url.toString());
     if (cached) {
       const episodes = await repo.listEpisodes(cached.id);
+      const job = input.queueAll && episodes.length > 0
+        ? await autoQueue(env, repo, cached.id)
+        : null;
       return jsonOk({
         series: cached,
         episodes,
         extractor: cached.sourceKey,
         cached: true,
+        ...(job ? { job } : {}),
       });
     }
   }
 
   const extractor = resolveExtractor(url, env, input.sourceKey);
-  const extracted = await extractor.extract(url, env);
+  // Bound the whole sniffing pass: a slow host must not hold the request open.
+  const controller = new AbortController();
+  const analyzeBudgetMs = Math.max(8_000, Math.min(50_000, grabConfig(env).pageTimeoutMs * 3));
+  const timer = setTimeout(() => controller.abort(new Error(`analyze exceeded its ${analyzeBudgetMs}ms budget`)), analyzeBudgetMs);
+  let extracted;
+  try {
+    extracted = await extractor.extract(url, env, controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
 
   const series = await repo.upsertSeries({
     sourceKey: extracted.sourceKey,
@@ -135,7 +183,84 @@ app.post('/api/analyze', async (context) => {
     })),
   );
 
-  return jsonOk({ series, episodes, extractor: extractor.key, cached: false }, 200);
+  let job: JobDetail | null = null;
+  if (input.queueAll && episodes.length > 0) {
+    job = await autoQueue(env, repo, series.id);
+  }
+
+  return jsonOk({ series, episodes, extractor: extractor.key, cached: false, ...(job ? { job } : {}) }, 200);
+});
+
+/** Create (and queue) an "everything" job for a freshly analyzed series. */
+async function autoQueue(env: Env, repo: Repository, seriesId: string): Promise<JobDetail> {
+  try {
+    return await new JobService(env, repo).createJob({
+      seriesId,
+      selection: { mode: 'all' },
+      options: { concurrency: defaultConcurrency(env) },
+    });
+  } catch (error) {
+    // The analysis result is still useful on its own, so report it with a warning.
+    console.warn(`[vtgrab] auto-queue failed for ${seriesId}: ${(error as Error).message}`);
+    throw error;
+  }
+}
+
+/**
+ * GET /api/preview?url=<media url>
+ *
+ * Plays a grabbed source in the browser through the Worker, which is how you check
+ * a result when the media host blocks hotlinking or the page is https/mixed.
+ *
+ * It is deliberately narrow: the same host policy as the grabber applies (no
+ * private/metadata addresses, optional allow-list), only video/audio/manifest
+ * responses are passed through, no cookies or authorization headers are forwarded,
+ * `Range` is passed through for seeking, and the stream size is capped.
+ */
+app.get('/api/preview', async (context) => {
+  const env = context.env;
+  const cfg = grabConfig(env);
+  if (!cfg.enabled) {
+    throw notConfigured('Preview is off because the real grabber is disabled (GRAB_ENABLED=false).');
+  }
+  const raw = context.req.query('url');
+  if (!raw) throw badRequest('Missing "url" query parameter');
+
+  const target = safeUrl(raw, cfg).url;
+  const headers: Record<string, string> = { ...baseHeaders(cfg, target.toString()), accept: '*/*' };
+  const range = context.req.header('range');
+  if (range && /^bytes=\d*-\d*$/.test(range.trim())) headers.range = range.trim();
+
+  const { response } = await grabFetch(
+    target,
+    cfg,
+    { method: 'GET', headers, timeoutMs: cfg.mediaTimeoutMs },
+    new Budget(2),
+  );
+
+  const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
+  const refuse = (message: string): never => {
+    void response.body?.cancel().catch(() => undefined);
+    throw badRequest(message);
+  };
+  if (isManifestContentType(contentType) || /\.(?:m3u8|mpd)(\?|$)/i.test(target.pathname)) {
+    refuse('This source is an HLS/DASH manifest, not a single file: queue the download to get one playable .ts/.mp4.');
+  }
+  if (!isMediaContentType(contentType)) {
+    refuse(`Refusing to proxy "${contentType.split(';')[0]}" - only media responses can be previewed.`);
+  }
+
+  const out = new Headers({
+    'content-type': contentType,
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  });
+  for (const header of ['content-length', 'content-range', 'accept-ranges']) {
+    const value = response.headers.get(header);
+    if (value) out.set(header, value);
+  }
+  return new Response(response.body, { status: response.status, headers: out });
 });
 
 // ---------------------------------------------------------------------------

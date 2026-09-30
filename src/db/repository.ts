@@ -326,6 +326,9 @@ export type JobItemPatch = Partial<
     | 'fileId'
     | 'provider'
     | 'providerRef'
+    | 'quality'
+    | 'container'
+    | 'objectKey'
     | 'startedAt'
     | 'finishedAt'
   >
@@ -798,6 +801,9 @@ export class Repository {
     if (patch.fileId !== undefined) push('file_id', patch.fileId);
     if (patch.provider !== undefined) push('provider', patch.provider);
     if (patch.providerRef !== undefined) push('provider_ref', patch.providerRef);
+    if (patch.quality !== undefined) push('quality', patch.quality);
+    if (patch.container !== undefined) push('container', patch.container);
+    if (patch.objectKey !== undefined) push('object_key', patch.objectKey);
     if (patch.startedAt !== undefined) push('started_at', patch.startedAt);
     if (patch.finishedAt !== undefined) push('finished_at', patch.finishedAt);
     if (fields.length === 0) return;

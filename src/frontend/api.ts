@@ -56,6 +56,8 @@ export interface AnalyzeResponse {
   episodes: EpisodeRecord[];
   extractor: string;
   cached: boolean;
+  /** Present when the analyze request also queued the found videos. */
+  job?: JobDetail;
 }
 
 export const api = {
@@ -80,10 +82,15 @@ export const api = {
   getSeries: (id: string) =>
     request<{ series: SeriesRecord; episodes: EpisodeRecord[] }>(`/api/series/${encodeURIComponent(id)}`),
 
-  analyze: (url: string, sourceKey?: string, refresh = false) =>
+  /**
+   * Open `url` on the server, find every video source on it and store the result.
+   * With `queueAll` the server also creates the download job in the same request,
+   * so one click puts every found video into the queue.
+   */
+  analyze: (url: string, sourceKey?: string, refresh = false, queueAll = false) =>
     request<AnalyzeResponse>('/api/analyze', {
       method: 'POST',
-      body: JSON.stringify({ url, ...(sourceKey ? { sourceKey } : {}), refresh }),
+      body: JSON.stringify({ url, ...(sourceKey ? { sourceKey } : {}), refresh, queueAll }),
     }),
 
   createJob: (seriesId: string, selection: SelectionDescriptor, options?: Partial<JobOptions>) =>

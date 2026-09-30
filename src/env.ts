@@ -1,6 +1,19 @@
 import type { QueueMessage } from './queue/messages';
 
 /**
+ * `GRAB_ENABLED` tri-state: unset means on, `false`/`0`/`off` means off.
+ * Kept here (instead of in `src/grab/config.ts`) so `mocksEnabled` and the
+ * provider registries can all read the same answer without an import cycle.
+ */
+function grabEnabledFlag(env: Env): boolean {
+  const raw = String(env.GRAB_ENABLED ?? '').trim().toLowerCase();
+  if (raw === '') return true;
+  if (['0', 'false', 'no', 'off', 'disabled'].includes(raw)) return false;
+  if (['1', 'true', 'yes', 'on', 'enabled'].includes(raw)) return true;
+  return true;
+}
+
+/**
  * Cloudflare bindings + configuration for the VTGrab Worker.
  *
  * Secrets (SOURCE_API_TOKEN, DOWNLOAD_SERVICE_TOKEN, DOWNLOAD_CALLBACK_SECRET)
@@ -29,6 +42,32 @@ export interface Env {
   STALE_ITEM_MINUTES: string;
   /** Comma separated allow-list of hostnames the authorized extractor may call. */
   SOURCE_ALLOWED_HOSTS: string;
+
+  // ---- real link grabber (src/grab/*) ---------------------------------------
+  /** Master switch for the sniff extractor + the real HTTP downloader. */
+  GRAB_ENABLED?: string;
+  /** Optional allow-list of hosts the grabber may open (empty = any public host). */
+  GRAB_ALLOWED_HOSTS?: string;
+  /** Hosts the grabber must never open, even if the allow-list accepts them. */
+  GRAB_DENIED_HOSTS?: string;
+  /** Also allow loopback/RFC1918/link-local targets. Development and tests only. */
+  GRAB_ALLOW_PRIVATE_HOSTS?: string;
+  GRAB_MAX_REDIRECTS?: string;
+  GRAB_PAGE_TIMEOUT_MS?: string;
+  GRAB_MEDIA_TIMEOUT_MS?: string;
+  GRAB_MAX_PAGE_BYTES?: string;
+  GRAB_MAX_VIDEO_BYTES?: string;
+  GRAB_CHUNK_BYTES?: string;
+  GRAB_MAX_VIDEOS?: string;
+  GRAB_MAX_CANDIDATES?: string;
+  GRAB_PROBE?: string;
+  GRAB_FOLLOW_EMBEDS?: string;
+  GRAB_MAX_DEPTH?: string;
+  GRAB_CRAWL?: string;
+  GRAB_MAX_CRAWL_PAGES?: string;
+  GRAB_FETCH_CONCURRENCY?: string;
+  GRAB_MAX_SUBREQUESTS?: string;
+  GRAB_USER_AGENT?: string;
   /** Public origin of this Worker, used to build provider callback URLs. */
   PUBLIC_BASE_URL: string;
 
@@ -74,6 +113,11 @@ export function queuePushBatchSize(env: Env): number {
 
 export function defaultConcurrency(env: Env): number {
   return Math.max(1, Math.min(20, num(env, 'DEFAULT_CONCURRENCY', 4)));
+}
+
+/** True when the real grabber (page sniffing + HTTP downloading) may run. */
+export function grabEnabled(env: Env): boolean {
+  return grabEnabledFlag(env);
 }
 
 /** Seconds a stored object may be cached downstream (`/api/files/:id/content`). */

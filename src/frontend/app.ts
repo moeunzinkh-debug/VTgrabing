@@ -127,12 +127,16 @@ function renderStatus(): void {
   const providers = state.status?.downloadProviders ?? [];
   const anyAvailable = providers.some((provider) => provider.available);
   for (const provider of providers) {
+    const kindLabel = provider.kind === 'mock' ? 'mock' : provider.kind === 'http' ? 'real' : provider.kind;
     const providerChip = chip(
-      `${provider.kind === 'mock' ? 'mock' : 'remote'}: ${provider.key}${provider.available ? '' : ' (off)'}`,
+      `${kindLabel}: ${provider.key}${provider.available ? '' : ' (off)'}`,
       provider.available ? 'ok' : anyAvailable ? 'muted' : 'error',
     );
     providerChip.title = provider.reason ?? '';
     badges.appendChild(providerChip);
+  }
+  if (state.status?.grab && !state.status.grab.enabled) {
+    badges.appendChild(chip('grabber off', 'error'));
   }
 
   const connection = $('connection');
@@ -182,16 +186,51 @@ function renderSourceOptions(): void {
 function renderHint(): void {
   const hint = $('analyze-hint');
   const available: ProviderDescriptor[] = (state.status?.extractors ?? []).filter((item) => item.available);
+  const grab = state.status?.grab;
   if (available.length === 0) {
     hint.textContent =
-      'No extractor is configured. Set SOURCE_API_BASE_URL + SOURCE_API_TOKEN for an authorized catalog, or MOCK_ENABLED=true for local development.';
+      'No extractor is configured. Turn the real grabber on with GRAB_ENABLED=true (it needs no secrets), or point SOURCE_API_BASE_URL at your own catalog API.';
     hint.classList.add('warn-text');
     return;
   }
   hint.classList.remove('warn-text');
-  hint.textContent = available
-    .map((item) => `${item.key}: ${item.reason ?? item.label}`)
-    .join(' • ');
+  const parts = available.map((item) => `${item.key}: ${item.reason ?? item.label}`);
+  if (grab?.enabled) {
+    parts.push(
+      `per analyze: up to ${grab.maxVideos} videos, ${(grab.maxVideoBytes / 1024 / 1024 / 1024).toFixed(1)} GiB each` +
+        (grab.allowedHosts.length > 0 ? `, hosts ${grab.allowedHosts.join(', ')}` : ', any public host') +
+        (grab.crawl ? `, crawls up to ${grab.maxCrawlPages} linked episode page(s)` : ''),
+    );
+  }
+  hint.textContent = parts.join(' • ');
+}
+
+/** True when every rendition of a found video is encrypted (DRM / #EXT-X-KEY). */
+/**
+ * Why the grabber can list this video but cannot store it: `encrypted` (DRM /
+ * `#EXT-X-KEY`) or `live` (a playlist that is still running). Mirrors the server-side
+ * filter in `JobService`, so the list you see is the list that gets queued.
+ */
+function episodeBlockReason(episode: EpisodeRecord): 'encrypted' | 'live' | null {
+  const streams = episode.streams;
+  if (streams.length === 0) {
+    if (episode.metadata.encrypted === true) return 'encrypted';
+    if (episode.metadata.live === true) return 'live';
+    return null;
+  }
+  if (streams.every((stream) => stream.encrypted === true)) return 'encrypted';
+  if (streams.every((stream) => stream.live === true)) return 'live';
+  if (streams.every((stream) => stream.encrypted === true || stream.live === true)) return 'encrypted';
+  return null;
+}
+
+function isEncryptedOnly(episode: EpisodeRecord): boolean {
+  return episodeBlockReason(episode) !== null;
+}
+
+/** Largest advertised size across the renditions of one video. */
+function episodeSize(episode: EpisodeRecord): number {
+  return episode.streams.reduce((total, stream) => Math.max(total, stream.sizeBytes ?? 0), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +263,31 @@ function renderSeries(): void {
   if (state.series.synopsis) header.appendChild(el('p', 'synopsis', state.series.synopsis));
   header.appendChild(el('p', 'muted small', state.series.sourceUrl));
 
+  // What the grabber actually did on that URL (pages opened, hosts refused, ...).
+  const diagnostics = Array.isArray(state.series.metadata?.diagnostics)
+    ? (state.series.metadata.diagnostics as unknown[]).map((line) => String(line))
+    : [];
+  const diagBox = $('analyze-diag');
+  const diagText = $('analyze-diag-text');
+  diagBox.hidden = diagnostics.length === 0;
+  diagText.textContent = diagnostics.join('\n');
+
+  const blocked = state.episodes.filter(isEncryptedOnly).length;
+  const protectedCount = state.episodes.filter((episode) => episodeBlockReason(episode) === 'encrypted').length;
+  const liveCount = state.episodes.filter((episode) => episodeBlockReason(episode) === 'live').length;
+  const queueNote = $('queue-note');
+  queueNote.textContent =
+    blocked > 0
+      ? [
+          protectedCount > 0 ? `${protectedCount} encrypted (DRM / #EXT-X-KEY): VTGrab never fetches keys or decrypts` : '',
+          liveCount > 0 ? `${liveCount} live broadcast(s): no finished file to store yet` : '',
+          'these are listed but never queued',
+        ]
+        .filter(Boolean)
+        .join(' - ')
+      : 'One job item per video; the Worker streams each source into R2 and the queue retries failures.';
+  queueNote.classList.toggle('warn-text', blocked > 0);
+
   const rangeFrom = $<HTMLInputElement>('range-from');
   const rangeTo = $<HTMLInputElement>('range-to');
   rangeTo.max = String(state.episodes.length);
@@ -250,8 +314,10 @@ function renderQualityOptions(): void {
     if (Number.isFinite(left) && Number.isFinite(right)) return right - left;
     return a.localeCompare(b);
   });
+  // "source" = whatever the host offers, which is what a grabbed page usually has.
+  if (!ordered.includes('source')) ordered.push('source');
   clear(select);
-  for (const quality of ordered.length > 0 ? ordered : ['1080p', '720p', '480p']) {
+  for (const quality of ordered.length > 1 ? ordered : ['source']) {
     const option = el('option', undefined, quality);
     option.value = quality;
     select.appendChild(option);
@@ -273,10 +339,13 @@ function renderEpisodes(): void {
   clear(grid);
 
   for (const episode of state.episodes) {
-    const item = el('label', 'episode');
+    const blocked = isEncryptedOnly(episode);
+    const item = el('label', blocked ? 'episode episode-blocked' : 'episode');
     const checkbox = el('input') as HTMLInputElement;
     checkbox.type = 'checkbox';
-    checkbox.checked = state.selected.has(episode.id);
+    // A video we are not able to decrypt is shown but cannot be selected.
+    checkbox.checked = !blocked && state.selected.has(episode.id);
+    checkbox.disabled = blocked;
     checkbox.dataset.episodeId = episode.id;
     checkbox.dataset.episodeIndex = String(episode.episodeIndex);
     checkbox.addEventListener('click', onEpisodeClick);
@@ -286,10 +355,42 @@ function renderEpisodes(): void {
     body.appendChild(el('span', 'episode-title', episode.title));
     const meta = el('div', 'episode-meta');
     meta.appendChild(el('span', undefined, formatDuration(episode.durationSeconds)));
-    for (const stream of episode.streams.slice(0, 3)) {
-      meta.appendChild(el('span', 'chip chip-muted', stream.quality));
+    const size = episodeSize(episode);
+    if (size > 0) meta.appendChild(el('span', 'chip chip-muted', formatBytes(size)));
+    for (const stream of episode.streams.slice(0, 4)) {
+      const quality = el('span', 'chip chip-muted', `${stream.quality}${stream.container ? ` · ${stream.container}` : ''}`);
+      quality.title = stream.note ?? stream.url ?? '';
+      meta.appendChild(quality);
+    }
+    if (episode.streams.length > 4) meta.appendChild(el('span', 'chip chip-muted', `+${episode.streams.length - 4} more`));
+    const kind = episode.streams[0]?.kind;
+    if (kind && kind !== 'progressive') meta.appendChild(el('span', 'chip chip-muted', kind.toUpperCase()));
+    if (blocked) {
+      const reason = episodeBlockReason(episode);
+      meta.appendChild(
+        el('span', 'chip chip-error', reason === 'live' ? 'live - not a file' : 'encrypted - not grabbable'),
+      );
     }
     body.appendChild(meta);
+
+    const source = episode.streams.find((stream) => stream.url)?.url ?? episode.sourceUrl;
+    if (source) {
+      const links = el('div', 'episode-links');
+      const open = el('a', 'link', 'source') as HTMLAnchorElement;
+      open.href = source;
+      open.target = '_blank';
+      open.rel = 'noopener noreferrer';
+      links.appendChild(open);
+      if (!blocked) {
+        const preview = el('a', 'link', 'preview') as HTMLAnchorElement;
+        preview.href = `/api/preview?url=${encodeURIComponent(source)}`;
+        preview.target = '_blank';
+        preview.rel = 'noopener';
+        preview.title = 'Play it through the Worker (the media host only sees the Worker request, no cookies are sent)';
+        links.appendChild(preview);
+      }
+      body.appendChild(links);
+    }
 
     item.appendChild(checkbox);
     item.appendChild(body);
@@ -519,6 +620,7 @@ async function runAnalyze(event: SubmitEvent): Promise<void> {
   }
   const sourceKey = $<HTMLSelectElement>('analyze-source').value || undefined;
   const refresh = $<HTMLInputElement>('analyze-refresh').checked;
+  const queueAll = $<HTMLInputElement>('analyze-queue').checked;
 
   const errorBox = $('analyze-error');
   errorBox.hidden = true;
@@ -528,17 +630,27 @@ async function runAnalyze(event: SubmitEvent): Promise<void> {
   $<HTMLButtonElement>('analyze-submit').disabled = true;
 
   try {
-    const result = await api.analyze(url, sourceKey, refresh);
+    const result = await api.analyze(url, sourceKey, refresh, queueAll);
     state.series = result.series;
     state.episodes = result.episodes;
-    state.selected = new Set<string>();
-    state.anchorIndex = null;
-    state.selectionMode = 'ids';
-    renderSeries();
-    toast(
-      `Analyzed ${result.episodes.length} episodes with ${result.extractor}${result.cached ? ' (cached)' : ''}`,
-      'success',
+    // Every video we found (and are allowed to grab) starts out selected: the point
+    // of "analyze this link" is "grab the videos on it".
+    state.selected = new Set(
+      result.episodes.filter((episode) => !isEncryptedOnly(episode)).map((episode) => episode.id),
     );
+    state.anchorIndex = null;
+    state.selectionMode = 'all';
+    renderSeries();
+    renderSelectionCount();
+    if (result.job) {
+      state.details.set(result.job.job.id, result.job);
+      state.expanded.add(result.job.job.id);
+      toast(`Queued ${result.job.job.totalItems} video(s) for download (job ${result.job.job.id})`, 'success');
+      await Promise.all([refreshJobs(), refreshFiles()]);
+    } else {
+      const found = `found ${result.episodes.length} video(s) via ${result.extractor}${result.cached ? ' (from cache)' : ''}`;
+      toast(queueAll ? `${found} - nothing new to queue` : found, 'success');
+    }
   } catch (error) {
     showError(errorBox, error);
   } finally {
@@ -558,7 +670,10 @@ async function runCreateJob(mode: 'ids' | 'all'): Promise<void> {
   if (!state.series) return;
   const seriesId = state.series.id;
   const ids =
-    mode === 'all' ? state.episodes.map((episode) => episode.id) : [...state.selected];
+    mode === 'all'
+      ? // "all" never means "including the ones we refuse to decrypt".
+        state.episodes.filter((episode) => !isEncryptedOnly(episode)).map((episode) => episode.id)
+      : [...state.selected];
   if (ids.length === 0) {
     toast('Select at least one episode first', 'error');
     return;

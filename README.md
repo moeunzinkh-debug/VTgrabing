@@ -20,15 +20,16 @@ assets by the same Worker.
 1. [Architecture](#architecture)
 2. [Data model](#data-model)
 3. [Quick start (local)](#quick-start-local)
-4. [Deployment to Cloudflare (exact commands)](#deployment-to-cloudflare-exact-commands)
-5. [Environment variables & secrets](#environment-variables--secrets)
-6. [HTTP API](#http-api)
-7. [Authorized source integration (extractor contract)](#authorized-source-integration-extractor-contract)
-8. [Authorized download service (provider contract)](#authorized-download-service-provider-contract)
-9. [Runtime limitations of Workers and how this design handles them](#runtime-limitations-of-workers-and-how-this-design-handles-them)
-10. [Testing](#testing)
-11. [Project layout](#project-layout)
-12. [Khmer summary](#khmer-summary-សង្ខបជាភាសាខ្មរ)
+4. [Real link grabbing](#real-link-grabbing)
+5. [Deployment to Cloudflare (exact commands)](#deployment-to-cloudflare-exact-commands)
+6. [Environment variables & secrets](#environment-variables--secrets)
+7. [HTTP API](#http-api)
+8. [Authorized source integration (extractor contract)](#authorized-source-integration-extractor-contract)
+9. [Authorized download service (provider contract)](#authorized-download-service-provider-contract)
+10. [Runtime limitations of Workers and how this design handles them](#runtime-limitations-of-workers-and-how-this-design-handles-them)
+11. [Testing](#testing)
+12. [Project layout](#project-layout)
+13. [Khmer summary](#khmer-summary-សង្ខបជាភាសាខ្មរ)
 
 ---
 
@@ -127,6 +128,122 @@ npm run build
 
 ---
 
+## Real link grabbing
+
+This is the default path: paste a link, press **Analyze**, and VTGrab opens that link,
+finds every video it can see there, and queues all of them. Nothing in this flow is
+sample data - each number in the listing came from a response by the media host, and
+every stored byte was transferred from that host.
+
+```
+link ──▶ POST /api/analyze { url, queueAll: true }
+          │
+          ├─ open the page (real GET, text-limited, timeout-bounded)
+          ├─ find video URLs            <video>/<source>, <a href>, <link rel=preload>,
+          │                              og:video / twitter:player, data-* attributes,
+          │                              jwplayer/videojs config blobs, JSON-LD VideoObject,
+          │                              a raw scan of the document as a last resort
+          ├─ follow embedded players     <iframe>/<embed> players, up to 6 hops deep
+          ├─ crawl the episode list      same-origin links that look like episodes, so one
+          │                              series URL turns into every video it announces
+          ├─ confirm each candidate      HEAD (or a 1-byte Range GET) against the media
+          │                              host: a URL that does not answer with media is
+          │                              dropped, never queued
+          └─ read the manifests          HLS master → rendition → segment list;
+                                         DASH SegmentTemplate/SegmentList/SegmentBase;
+                                         real duration, segment count, bitrate, size
+                                         estimate, container and the encryption verdict
+      ──▶ one job item per grabbable video (selection: all), persisted in D1
+      ──▶ http-stream downloads the bytes into R2
+```
+
+### What "real download" means here
+
+| source shape          | how the bytes arrive                                                        |
+| --------------------- | --------------------------------------------------------------------------- |
+| one progressive file  | `Range` chunks of `GRAB_CHUNK_BYTES` (5-64 MiB), assembled as an R2 multipart upload; a chunk that comes back short is re-requested, and a body that ends early fails instead of storing a truncated file |
+| HLS (`.m3u8`)         | segments fetched in parallel but concatenated in playlist order; MPEG-TS stays `.ts`, `#EXT-X-MAP` (fMP4/CMAF) gets the init segment in front |
+| DASH (`.mpd`)         | `SegmentTemplate` (with `$Number$`/`$Time$`/`$RepresentationID$` and `SegmentTimeline`), `SegmentList` or a single-file `SegmentBase` |
+
+Progress is written per item (`part n/m`, `segment n/m`) and the container of the stored
+object follows what the manifest actually contains, so the file name matches the bytes.
+
+### What it will not do
+
+* **No DRM, no key fetching.** A `#EXT-X-KEY` or `ContentProtection` stream is listed with
+  `encrypted - not grabbable`, its checkbox is disabled, and `JobService` refuses to create
+  an item for it. (Live playlists without `#EXT-X-ENDLIST` are treated the same way: there
+  is no finished file yet.)
+* **No cookies, tokens or header injection.** The only request headers are a browser-like
+  `User-Agent`, `Accept`/`Range`, and a `Referer`/`Origin` echoing the page the link came
+  from - which is what hotlink-protected hosts require. A login-only video stays
+  login-only, and the error says so instead of pretending.
+* **Only public, non-private addresses.** Private, link-local (cloud metadata), CGNAT,
+  multicast and reserved names (`.localhost`, `.local`, `.internal`, `.test`, …) are refused
+  before the request leaves the isolate; `GRAB_ALLOWED_HOSTS` / `GRAB_DENIED_HOSTS` narrow it
+  further. Loopback targets are only possible outside production with
+  `GRAB_ALLOW_PRIVATE_HOSTS=true`.
+* **Budgeted.** `GRAB_MAX_VIDEOS`, `GRAB_MAX_CANDIDATES`, `GRAB_MAX_CRAWL_PAGES`,
+  `GRAB_MAX_VIDEO_BYTES` and `GRAB_MAX_SUBREQUESTS` cap one analyze/download; the analyze
+  request itself is aborted past `min(50s, 3 × GRAB_PAGE_TIMEOUT_MS)`.
+
+### Grabber variables
+
+| name | default | meaning |
+| ---- | ------- | ------- |
+| `GRAB_ENABLED` | `true` | turns the real grabber on; with it off, `mock`/authorized providers only |
+| `GRAB_ALLOWED_HOSTS` | `""` | comma separated hosts that may be opened (empty = any public host) |
+| `GRAB_DENIED_HOSTS` | `""` | hosts that may never be opened |
+| `GRAB_ALLOW_PRIVATE_HOSTS` | `false` | development only: allow loopback/RFC1918 targets (ignored when `ENVIRONMENT=production`) |
+| `GRAB_MAX_VIDEOS` | `200` | most videos one link may produce |
+| `GRAB_MAX_CANDIDATES` | `120` | most URLs sniffed per document |
+| `GRAB_CRAWL` / `GRAB_MAX_CRAWL_PAGES` | `true` / `24` | follow episode links found on the page |
+| `GRAB_FOLLOW_EMBEDS` | `true` | open `<iframe>`/`<embed>` players |
+| `GRAB_PAGE_TIMEOUT_MS` / `GRAB_MEDIA_TIMEOUT_MS` | `20000` / `180000` | per-request timeouts |
+| `GRAB_MAX_PAGE_BYTES` | `4194304` | how much of a document is read |
+| `GRAB_MAX_VIDEO_BYTES` | `3221225472` | per-object size cap (3 GiB) |
+| `GRAB_CHUNK_BYTES` | `8388608` | progressive Range part size (also the R2 part size) |
+| `GRAB_PROBE` | `true` | confirm every candidate against the media host before listing it |
+| `GRAB_FETCH_CONCURRENCY` | `8` | parallel segment fetches |
+| `GRAB_MAX_SUBREQUESTS` | `900` | fetch budget per invocation |
+| `GRAB_USER_AGENT` | a Chrome UA | what the origin sees |
+
+`GET /api/preview?url=…` is the one media proxy the UI uses: it re-applies the same host
+policy, refuses manifests and non-media content types, passes through a `Range` header, and
+never forwards cookies - so in-browser playback of a remote file works without exposing the
+grabber as an open proxy.
+
+### Proving it works, locally, with real bytes
+
+```bash
+npm run verify:grab        # fixture site + wrangler dev + analyze + download + SHA-256
+```
+
+`scripts/verify-grab-e2e.mjs` starts `scripts/fixture-site.mjs` (a page that publishes the
+same video as a `<video>` tag, an anchor, a manifest, a player config blob and JSON-LD, plus
+an episode index, an embedded player, an encrypted playlist and a live playlist), runs the
+Worker with `MOCK_ENABLED:false`, then checks: the grabber was used, every video was found,
+the protected and live ones were refused rather than queued, and **the bytes stored in R2 are
+byte-identical (SHA-256) to the bytes the fixture served** - for the 7.8 MiB progressive
+file (fetched as two `Range` parts), for the HLS concatenation, and for the CMAF/DASH
+init-segment cases.
+
+To drive it by hand instead:
+
+```bash
+MEDIA=/path/to/any.mp4 node scripts/fixture-site.mjs &      # the site under test
+npx wrangler dev --ip 127.0.0.1 --port 8787 \
+  --var ENVIRONMENT:development --var MOCK_ENABLED:false \
+  --var GRAB_ALLOW_PRIVATE_HOSTS:true                        # the Worker
+# open http://127.0.0.1:8787 and analyze http://127.0.0.1:8099/
+```
+
+Against a real internet host, deploy the Worker (`npm run deploy`) and analyze any page
+whose videos are publicly reachable - a deployed Worker has normal outbound access, which
+a sandboxed dev server usually does not.
+
+---
+
 ## Deployment to Cloudflare
 
 VTGrab is configured in `wrangler.jsonc` to deploy and work **100% out of the box** on Cloudflare Workers — both via **Cloudflare Workers Builds (Git integration)** and via **`npx wrangler deploy`** — without requiring pre-created D1 UUIDs, R2 buckets, Paid Queues, or custom build tokens:
@@ -194,6 +311,8 @@ Environment specific config can be added with
 | `STALE_ITEM_MINUTES`       | var    | `20`                        | when the cron starts polling/failing a `downloading` item                |
 | `QUEUE_PUSH_BATCH_SIZE`    | var    | `100`                       | messages per `sendBatch()` (Queues hard limit is 100)                    |
 | `SOURCE_ALLOWED_HOSTS`     | var    | `""`                        | comma separated host allow-list for the authorized extractor             |
+| `GRAB_ENABLED`             | var    | `true`                      | real link grabber on/off (see [Real link grabbing](#real-link-grabbing)) |
+| `GRAB_ALLOWED_HOSTS`       | var    | `""`                        | hosts the grabber may open; empty = any public host                     |
 | `PUBLIC_BASE_URL`          | var    | `""`                        | public origin of this Worker (used to build callback URLs)               |
 | `SOURCE_API_BASE_URL`      | var    | –                           | root URL of the authorized catalog API (`…/v1/series`)                   |
 | `SOURCE_API_TOKEN`         | secret | –                           | `Authorization: Bearer …` for the catalog API                            |
@@ -362,6 +481,7 @@ to download something.
 ```bash
 npm test          # vitest run
 npm run test:watch
+npm run verify:grab   # real end-to-end grab: fixture site + Worker + SHA-256 of stored bytes
 ```
 
 The suite runs **inside the Workers runtime** with
@@ -380,6 +500,15 @@ migrations applied in `test/setup.ts`). It covers:
 * the authorized extractor contract (allow-list, Bearer request, response schema)
 * the remote provider contract (submit → poll → stream to R2, maintenance sweep,
   timeout failure)
+* the real grabber: SSRF/host policy, page sniffing (every discovery path), HLS and DASH
+  manifest reading (variants, `SegmentTimeline`, byte ranges, `#EXT-X-MAP`, keys), quality
+  labels and container decisions (`test/grab.test.ts`)
+* byte-exact transfer: ranged parts, a short part re-requested, an origin without `Range`
+  support, a 404/HTML response refused, segment concatenation, encrypted and live refusal
+  (`test/grab-download.test.ts`, with `fetch` replaced by an HTTP-speaking fixture)
+* `npm run verify:grab` drives the whole thing through the real Worker: analyze a page,
+  queue everything it found, wait for the job, then SHA-256 each stored object against the
+  bytes the fixture served (see [Real link grabbing](#real-link-grabbing))
 
 ---
 
@@ -396,13 +525,17 @@ src/
   jobs/service.ts      create / cancel / retry / dispatch
   jobs/orchestrator.ts queue handlers, R2 completion, maintenance
   queue/               message schema + consumer
-  providers/extract/   SourceExtractor: mock + authorized HTTP
-  providers/download/  DownloadProvider: mock + authorized remote service
+  grab/                the real grabber: host policy, HTTP budget, sniffing, HLS/DASH
+                       readers, ranged + segmented byte transfer
+  providers/extract/   SourceExtractor: http-sniff (real) + mock + authorized HTTP
+  providers/download/  DownloadProvider: http-stream (real) + mock + remote service
   providers/storage/   streaming R2 writer (multipart)
   providers/signature.ts  HMAC-SHA256 request signing
   frontend/            Vite SPA (index.html, app.ts, api.ts, styles.css)
   shared/types.ts      domain types used by both bundles
+scripts/               fixture site + end-to-end grab verification + deploy config check
 test/                  vitest-pool-workers suite
+test-frontend/         jsdom tests for the SPA
 ```
 
 ---
@@ -414,20 +547,31 @@ metadata), **R2** (ទុក file) និង **Queues** (ដំណើរកា�
 
 លំហូរការងារ៖
 
-1. បញ្ចូល URL → **Analyze** → Worker ហៅ **SourceExtractor** (production ប្រើ
-   Authorized catalog API ដែលអ្នកមានសិទ្ធ; local ប្រើ MockExtractor) រួចទុក
-   series + episodes ចូល D1។
+1. បញ្ចូល URL → **Analyze** → Worker បើក URL នោះ**ពិតប្រាកដ** (HTTP GET) រើស
+   វីដេអូទាំងអស់ដែលមានក្នុងទំព័រ (`<video>`/`<source>`, `<a href>`, og:video,
+   data-*, player config, JSON-LD) តាម iframe player និងតំណ episode ទាំងអស់
+   រួច **បញ្ចូលវីដេអូដែលរកឃើញទាំងអស់ចូល queue** (មួយ item ក្នុងមួយវីដេអូ)
+   ហើយទុក series + episodes ចូល D1។ លទ្ធផលមិនមែនជាទិន្នន័យគំរូទេ៖
+   quality, duration, ចំនួន segment, ទំហំ និង "encrypted" មកពីការឆ្លើយតប
+   របស់ host ពិត។ (Authorized catalog API ដែលអ្នកមានសិទ្ធអាចប្រើជំនួស
+   បាន; MockExtractor មានតែពេល `MOCK_ENABLED=true` សម្រាប់ dev/test។)
 2. ជ្រើស episode (checkbox, shift-click, ជួរ `from–to`, Select all, Deselect
    all, Invert) → បង្កើត **job**។ Job និង job item ត្រូវបានសរសេរចូល D1 ក្នុង
    transaction តែមួយ ហើយផ្ញើ queue message មួយក្នុងមួយ episode។
-3. **Queue consumer** ទាញយក សរសេរ object ចូល R2 (stream ជា 8 MiB multipart)
+3. **Queue consumer** ទាញយក byte ពិតៗ (progressive = `Range` chunk, HLS/DASH =
+   segments តាមលំដាប់ playlist) សរសេរ object ចូល R2 (stream ជា 8 MiB multipart)
    បង្កើត row ក្នុង `files` ហើយធ្វើបច្ចុប្បន្នភាព progress។ មាន retry, cancel,
    concurrency limiter និង cron សម្រាប់តាមដាន job ដែលយឺត។
 4. Frontend បង្ហាញស្ថានភាពពិតពី backend (pending, downloading, completed,
    failed, cancelled) ដោយ auto-refresh រៀងរាល់ 2 វិនាទី ហើយអាចទាញយក file ពី
    R2 តាម `/api/files/:id/content`។
 
-ចំណុចសំខាន់៖ **MockExtractor / MockDownloadProvider ប្រើតែសម្រាប់ local dev
+ចំណុចសំខាន់៖ VTGrab **មិនរំលង DRM** — វីដេអូដែលមាន `#EXT-X-KEY` ឬ
+`ContentProtection` ត្រូវបង្ហាញឈ្មោះ ប៉ុន្តែមិនដាក់ក្នុង queue ទេ, ហើយមិន
+មានការបញ្ចូល cookie/token ដើម្បីមើលវីដេអូដែលត្រូវបង់ប្រាក់។ មូលហេតុ
+ទាំងនេះបង្ហាញក្នុង UI និងក្នុង job event ដោយត្រង់ៗ (មិនបាត់ស្ងាត់ទេ)។
+
+* **MockExtractor / MockDownloadProvider ប្រើតែសម្រាប់ local dev
 និង test ប៉ុណ្ណោះ** (បិទដោយ `MOCK_ENABLED=false`)។ វាបង្កើតទិន្នន័យសំយោគ
 (synthetic) ដែលសរសេរចំណាយថា "NOT REAL MEDIA" — មិនមែនការទាញយកវីដេអូពិតទេ។
 Production ប្រើ service ខាងក្រៅដែលមានការអនុញ្ញាត ( catalog API + download
