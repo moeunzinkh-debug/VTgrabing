@@ -13,19 +13,64 @@
   // The Worker runs first and serves the Vite bundle from `env.ASSETS`, with an
   // explicit SPA fallback (see src/index.ts).
   //
-  // ./dist is git-ignored, so it only exists after a build. Cloudflare Workers
-  // Builds therefore needs a *build command* (`npm run build`) in front of the
-  // deploy command, otherwise the deploy fails with:
-  //   The directory specified by the "assets.directory" field ... does not exist
+  // ./dist is git-ignored: run `npm run build` before `npx wrangler deploy`.
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "run_worker_first": true
   },
 
-  // Like the Recap-ai worker: no D1 / R2 / Queue bindings, so a GitHub push
-  // deploys with nothing to create in the Cloudflare dashboard first.
-  // API routes that need storage answer 503 until bindings are added back.
+  // ---------------------------------------------------------------------------
+  // D1 - relational metadata (series, episodes, jobs, job_items, files, events)
+  // ---------------------------------------------------------------------------
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vtgrab-db",
+      // Replace with the ID printed by `npx wrangler d1 create vtgrab-db`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // ---------------------------------------------------------------------------
+  // R2 - completed media objects
+  // ---------------------------------------------------------------------------
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "vtgrab-files"
+    }
+  ],
+
+  // ---------------------------------------------------------------------------
+  // Queues - job orchestration
+  // ---------------------------------------------------------------------------
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOB_QUEUE",
+        "queue": "vtgrab-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "vtgrab-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "max_concurrency": 4,
+        "retry_delay": 30
+      }
+    ]
+  },
+
+  // ---------------------------------------------------------------------------
+  // Cron - maintenance: expire stale downloads, re-poll deferred provider jobs
+  // ---------------------------------------------------------------------------
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
 
   "vars": {
     "ENVIRONMENT": "production",
