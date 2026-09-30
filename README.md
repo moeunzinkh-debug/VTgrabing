@@ -175,13 +175,13 @@ npx wrangler versions secret put DOWNLOAD_CALLBACK_URL  # same value, or your cu
 
 ### Deploy from the Cloudflare dashboard (Workers Builds / Git integration)
 
-`Workers & Pages → vtgrabing → Settings → Build` only needs three values:
+`Workers & Pages → vtgrabing → Settings → Build` - the values that matter:
 
 | Setting          | Value             | Why                                                                 |
 | ---------------- | ----------------- | ------------------------------------------------------------------- |
 | Git branch       | `main`            | production branch                                                   |
 | Build command    | `npm run build`   | creates `./dist` (git-ignored) - **required**, see below            |
-| Deploy command   | `npm run deploy`  | pre-deploy check + typecheck + Vite build + `wrangler deploy`       |
+| Deploy command   | `npm run deploy`  | pre-deploy check + typecheck + Vite build + `wrangler deploy` (`npx wrangler deploy` also works, it just skips the check) |
 | Root directory   | `/`               | `wrangler.jsonc` sits at the top of the repository                  |
 | Build variables  | none              | runtime vars/secrets belong in `Settings → Variables & Secrets`     |
 
@@ -201,44 +201,65 @@ Save the settings, then push a commit (or press **Retry build**) - Cloudflare
 clones the repo, runs the build command, then the deploy command. This only goes
 green once the account resources exist (see the next section).
 
-### Deploy from GitHub Actions (creates the resources for you)
+### Create the three resources the Worker binds to
 
-The repository contains `.github/workflows/deploy.yml`, which does the account
-setup that cannot be expressed in `wrangler.jsonc`:
+`wrangler.jsonc` binds a D1 database, an R2 bucket and a Queue. Cloudflare only
+needs their **names** - the single value that has to reach the repository is the
+D1 `database_id`.
 
-| Step                     | What it does                                                            |
-| ------------------------ | ----------------------------------------------------------------------- |
-| `npm run cf:provision`   | creates `vtgrab-db` (D1), `vtgrab-files` (R2) and `vtgrab-jobs` (Queues) if they are missing, and writes the real `database_id` into `wrangler.jsonc` |
-| `npm run db:migrate`     | applies `migrations/*.sql` to the remote D1 database                     |
-| `npm run deploy`         | pre-deploy check + typecheck + Vite build + `wrangler deploy`            |
-| persist step             | commits the real `database_id` back to `main` (once, `[skip ci]`) so the Cloudflare Git build uses the same config |
+**In the Cloudflare dashboard (no CLI):**
 
-It is idempotent - running it again changes nothing.
+| Resource | Where                                        | Create          |
+| -------- | -------------------------------------------- | --------------- |
+| D1       | `Storage & Databases → D1 SQL Database → Create` | `vtgrab-db`  |
+| R2       | `R2 → Create bucket`                         | `vtgrab-files`  |
+| Queues   | `Workers & Pages → Queues → Create queue`    | `vtgrab-jobs`   |
 
-**One-time setup** (in GitHub, never in the chat):
+Then open the D1 database, copy its **database ID** (a UUID such as
+`1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d`) and paste it over the all-zero value in
+`wrangler.jsonc`:
 
-`Settings → Secrets and variables → Actions → New repository secret`
-
+```jsonc
+"d1_databases": [
+  { "binding": "DB", "database_name": "vtgrab-db",
+    "database_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" }
+]
 ```
-Name:  CLOUDFLARE_API_TOKEN
-Value: a Cloudflare API token (dashboard -> My Profile -> API Tokens) with
-       Account: Account Settings (Read), Workers Scripts (Edit),
-                Workers R2 Storage (Edit), D1 (Edit), Queues (Edit)
-       User:    User Details (Read), Memberships (Read)
-```
 
-Then push to `main` (or run the workflow manually from the **Actions** tab).
-The account id is already in the workflow, so no second secret is needed unless
-the token belongs to another account (`CLOUDFLARE_ACCOUNT_ID`).
+Commit that change - the next Workers Build picks it up automatically.
 
-Prefer to do it from your own machine instead?
+**Or let the script do it** (needs `npx wrangler login` once, on your machine):
 
 ```bash
-npx wrangler login
-npm run cf:provision     # same script, same result
-npm run db:migrate
-npm run deploy
+npm run cf:provision   # creates all three + writes the database_id into wrangler.jsonc
+npm run db:migrate     # apply migrations to the remote database
 ```
+
+Either way, verify before pushing:
+
+```bash
+npm run cf:check       # fails while the database_id is still the template value
+```
+
+### Build token permissions
+
+Workers Builds creates its own API token from the **Edit Cloudflare Workers**
+template, which does **not** include D1 or Queues. If the deploy fails with an
+authentication/authorization error instead of `Invalid database UUID`, create
+your own token (`My Profile → API Tokens → Create Token → Custom token`) with:
+
+```
+Account | Workers Scripts    | Edit
+Account | Workers R2 Storage | Edit
+Account | D1                 | Edit
+Account | Queues             | Edit
+Zone    | Workers Routes     | Edit
+Account | Account Settings   | Read
+User    | User Details       | Read
+User    | User Memberships   | Read
+```
+
+...scoped to this account, and select it in `Settings → Build → Build token`.
 
 ### Reading a failed Workers Build
 
@@ -532,11 +553,15 @@ npm run deploy   # build + wrangler deploy
   ហើយ **build command** ជាអ្នកបង្កើត folder នោះ (ព្រោះ `dist/` មិនមានក្នុង git)។
 * ដូច្នេះ៖ Build command = `npm run build`, Deploy command = `npm run deploy`,
   Root directory = `/` (ព្រោះ `wrangler.jsonc` នៅឫសរៀងខាងលើរបស់ repo)។
-* បើអ្នកមិនចង់ធ្វើដោយដៃទេ កូដនេះមាន workflow
-  `.github/workflows/deploy.yml` ដែល **បង្កើត D1/R2/Queue ឲ្យស្វ័យប្រវត្តិ**
-  (`npm run cf:provision`) រួច migrate + deploy រៀងរាល់ពេល push ទៅ `main`។
-  អ្នកគ្រាន់តែបន្ថែម secret `CLOUDFLARE_API_TOKEN` ម្តងក្នុង GitHub
-  (Settings → Secrets and variables → Actions)។
+* ត្រូវបង្កើត resource ទាំង៣ ក្នុង Cloudflare dashboard៖
+  `Storage & Databases → D1 → Create` ឈ្មោះ `vtgrab-db`,
+  `R2 → Create bucket` ឈ្មោះ `vtgrab-files`,
+  `Queues → Create queue` ឈ្មោះ `vtgrab-jobs`។
+  រួចចម្លង **database ID** របស់ `vtgrab-db` (UUID) ដាក់ជំនួស `00000000-…`
+  ក្នុង `wrangler.jsonc` ហើយ commit — Cloudflare build ខាងប្រាកដនឹងដំណើរការ។
+* ឬឲ្យ script ធ្វើឲ្យ៖ `npx wrangler login` ម្តង រួច `npm run cf:provision`
+  (បង្កើតទាំង៣ + សរសេរ database_id ចូល `wrangler.jsonc`) ហើយ
+  `npm run db:migrate`។ ពិនិត្យមុន push៖ `npm run cf:check`។
 
 ---
 
