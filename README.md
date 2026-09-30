@@ -202,7 +202,7 @@ object follows what the manifest actually contains, so the file name matches the
 | `GRAB_PAGE_TIMEOUT_MS` / `GRAB_MEDIA_TIMEOUT_MS` | `20000` / `180000` | per-request timeouts |
 | `GRAB_MAX_PAGE_BYTES` | `4194304` | how much of a document is read |
 | `GRAB_MAX_VIDEO_BYTES` | `3221225472` | per-object size cap (3 GiB) |
-| `GRAB_CHUNK_BYTES` | `8388608` | progressive Range part size (also the R2 part size) |
+| `GRAB_CHUNK_BYTES` | `8388608` | progressive Range part size, and the R2 part size up to the writer's 8 MiB buffering cap |
 | `GRAB_PROBE` | `true` | confirm every candidate against the media host before listing it |
 | `GRAB_FETCH_CONCURRENCY` | `8` | parallel segment fetches |
 | `GRAB_MAX_SUBREQUESTS` | `900` | fetch budget per invocation |
@@ -224,9 +224,12 @@ same video as a `<video>` tag, an anchor, a manifest, a player config blob and J
 an episode index, an embedded player, an encrypted playlist and a live playlist), runs the
 Worker with `MOCK_ENABLED:false`, then checks: the grabber was used, every video was found,
 the protected and live ones were refused rather than queued, and **the bytes stored in R2 are
-byte-identical (SHA-256) to the bytes the fixture served** - for the 7.8 MiB progressive
-file (fetched as two `Range` parts), for the HLS concatenation, and for the CMAF/DASH
-init-segment cases.
+byte-identical (SHA-256) to the bytes the fixture served** - for the progressive file
+(larger than one `GRAB_CHUNK_BYTES` part, so it is fetched with several `Range` requests and
+stored as several R2 parts - the recorded part count is checked, not assumed), for the HLS
+concatenation, and for the CMAF/DASH init-segment cases. The fixture payload size is set by the
+verifier through `FIXTURE_BYTES`; running `node scripts/fixture-site.mjs` on its own keeps the
+default 3 MiB.
 
 To drive it by hand instead:
 

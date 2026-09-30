@@ -29,6 +29,10 @@ const results = [];
 let worker = null;
 let fixtureServer = null;
 
+/** R2 part size this run asks for; also the size of one progressive Range request. */
+const CHUNK_BYTES = 5 * 1024 * 1024;
+const mib = (bytes) => `${(bytes / 1024 / 1024).toFixed(2)}MiB`;
+
 function record(name, ok, detail = '') {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` - ${detail}` : ''}`);
@@ -100,6 +104,9 @@ async function main() {
   // will get before it is imported.
   process.env.PORT = String(FIXTURE_PORT);
   process.env.HOST = '127.0.0.1';
+  // Big enough to cross one R2 part (GRAB_CHUNK_BYTES below is the 5 MiB floor), so
+  // the multipart write path is exercised rather than assumed.
+  process.env.FIXTURE_BYTES ??= String(6 * 1024 * 1024 + 7);
   const { buildFixture, createFixtureServer } = await import('./fixture-site.mjs');
   const fixture = buildFixture();
   fixtureServer = createFixtureServer(fixture);
@@ -143,8 +150,9 @@ async function main() {
       // 127.0.0.1 is private, so the grabber needs the development-only override.
       '--var',
       'GRAB_ALLOW_PRIVATE_HOSTS:true',
+      // One chunk = one Range request = one R2 part (the documented behaviour).
       '--var',
-      'GRAB_CHUNK_BYTES:5242880',
+      `GRAB_CHUNK_BYTES:${CHUNK_BYTES}`,
       '--var',
       'GRAB_MAX_VIDEO_BYTES:67108864',
       '--var',
@@ -300,7 +308,7 @@ async function main() {
     compared += 1;
     if (ok === true) matched += 1;
     rows.push([
-      `${file.filename ?? 'file'} ${(bytes.byteLength / 1024 / 1024).toFixed(2)}MiB ${file.container ?? '?'}/${file.quality ?? '?'}`,
+      `${file.filename ?? 'file'} ${mib(bytes.byteLength)} ${file.container ?? '?'}/${file.quality ?? '?'}`,
       ok === null
         ? `stored (sha256 ${digest.slice(0, 12)}…, no fixture mapping)`
         : ok
@@ -308,6 +316,12 @@ async function main() {
           : `MISMATCH stored ${digest.slice(0, 12)}… vs source ${sha256(expected).slice(0, 12)}…`,
       // which source this file came from, for the named checks below
       `${sourceUrls.join(' ')} ${file.objectKey ?? ''}`,
+      // what the storage writer recorded for this object
+      {
+        bytes: bytes.byteLength,
+        parts: Number(file.metadata?.parts ?? 0),
+        multipart: Boolean(file.metadata?.multipart),
+      },
     ]);
     console.log(`         ${ok === false ? 'X' : 'v'} ${rows.at(-1)[0]} -> ${rows.at(-1)[1]}`);
   }
@@ -315,16 +329,22 @@ async function main() {
   record('stored bytes are byte-identical to the source', matched > 0 && matched === compared, `${matched}/${compared} hash-verified`);
   const verify = (row) => Boolean(row?.[1].includes('== source bytes'));
   const progressive = rows.find((row) => row[2].includes('/media/bunny.mp4'));
-  record('the 7.8 MiB MP4 was reassembled from Range parts', verify(progressive), `${progressive?.[0] ?? 'not found'}`);
+  record(
+    'a file larger than one chunk was fetched in several Range requests',
+    verify(progressive) && (progressive?.[3]?.bytes ?? 0) > CHUNK_BYTES,
+    `${progressive?.[0] ?? 'not found'} (chunk = ${mib(CHUNK_BYTES)})`,
+  );
   const hls = rows.find((row) => row[2].includes('/media/hls/'));
   record('the HLS video was reassembled from its segments', verify(hls), `${hls?.[0] ?? 'not found'}`);
   const cmaf = rows.find((row) => row[2].includes('/media/cmaf/'));
   record('the CMAF file got its init segment in front', verify(cmaf), `${cmaf?.[0] ?? 'not found'}`);
-  const multiPart = rows.find((row) => row[2].includes('/media/bunny.mp4'));
+  const stored = progressive?.[3];
   record(
     'a large file became more than one R2 part',
-    Boolean(multiPart && Number(multiPart[0].match(/(\d+\.\d+)MiB/)?.[1]) > 5),
-    multiPart?.[0] ?? 'not found',
+    Boolean(stored?.multipart && stored.parts > 1),
+    stored
+      ? `${mib(stored.bytes)} -> ${stored.parts} part(s) of at most ${mib(CHUNK_BYTES)}`
+      : 'the progressive file was not stored',
   );
 
   console.log('\n[verify] series/episodes as stored in D1:');

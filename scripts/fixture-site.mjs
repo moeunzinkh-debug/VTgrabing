@@ -24,6 +24,9 @@
  * Usage:
  *   node scripts/fixture-site.mjs                          # http://127.0.0.1:8099
  *   MEDIA=/path/to/real.mp4 node scripts/fixture-site.mjs  # use your own media
+ *   FIXTURE_BYTES=7340032 node scripts/fixture-site.mjs    # bigger synthetic payload
+ *                                                          # (verify:grab uses ~6 MiB so
+ *                                                          #  one file spans several parts)
  */
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -34,6 +37,13 @@ const PORT = Number.parseInt(process.env.PORT ?? '8099', 10);
 const HOST = process.env.HOST ?? '127.0.0.1';
 const ROOT = process.env.FIXTURE_DIR ?? '/tmp/vtgrab-fixture';
 const PROVIDED = process.env.MEDIA ?? join(ROOT, 'bunny.mp4');
+/**
+ * Size of the synthetic payload when no real media was supplied. A few MiB is enough to
+ * cross the storage part size (see `GRAB_CHUNK_BYTES`) so the multipart path gets
+ * exercised; the odd `+ 7` keeps a short final part.
+ */
+const generatedBytes = () =>
+  Math.max(64 * 1024, Number.parseInt(process.env.FIXTURE_BYTES ?? '', 10) || 3 * 1024 * 1024 + 7);
 const ORIGIN = `http://${HOST}:${PORT}`;
 
 const SEGMENT_COUNT = 4;
@@ -64,11 +74,17 @@ function write(path, data) {
 /** Build the fixture tree on disk and return the sizes the pages advertise. */
 export function buildFixture() {
   mkdirSync(ROOT, { recursive: true });
-  const bytes = existsSync(PROVIDED) && statSync(PROVIDED).isFile()
+  const wanted = generatedBytes();
+  const supplied = existsSync(PROVIDED) && statSync(PROVIDED).isFile();
+  // A leftover generated file must not decide what a run looks like: when this run asks
+  // for a different payload size (FIXTURE_BYTES) the file is rewritten. A real media file
+  // given through MEDIA is always used as it is.
+  const reusable = supplied && (process.env.MEDIA ? true : statSync(PROVIDED).size === wanted);
+  const bytes = reusable
     ? Buffer.from(readFileSync(PROVIDED))
     : (() => {
-        log(`no media at ${PROVIDED}, generating deterministic synthetic bytes`);
-        const generated = syntheticPayload(3 * 1024 * 1024 + 7, 12345);
+        log(`no usable media at ${PROVIDED} (${wanted} bytes asked for), generating deterministic synthetic bytes`);
+        const generated = syntheticPayload(wanted, 12345);
         write(join(ROOT, 'bunny.mp4'), generated);
         return generated;
       })();

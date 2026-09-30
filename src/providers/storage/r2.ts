@@ -2,12 +2,16 @@
  * Streaming writer for R2.
  *
  * Cloudflare Workers have a 128 MB memory ceiling and R2 multipart uploads require
- * every part but the last to be at least 5 MiB, so the writer buffers ~8 MiB chunks
- * and streams them out instead of holding a whole object in memory.
+ * every part but the last to be at least 5 MiB, so the writer buffers one part at a
+ * time (~8 MiB by default) and streams them out instead of holding a whole object in
+ * memory. Callers may size that part - the download orchestrator passes
+ * `GRAB_CHUNK_BYTES`, which is documented as "one progressive chunk = one R2 part".
  */
 
 export const MULTIPART_THRESHOLD_BYTES = 8 * 1024 * 1024; // 8 MiB
 export const PART_SIZE_BYTES = 8 * 1024 * 1024; // 8 MiB (>= R2 5 MiB minimum)
+/** R2 rejects any part but the last one below 5 MiB, so that is the floor. */
+export const MIN_PART_SIZE_BYTES = 5 * 1024 * 1024;
 const MAX_PARTS = 10_000; // R2 hard limit
 
 export interface WrittenObject {
@@ -22,6 +26,19 @@ interface PutOptions {
   httpMetadata?: R2HTTPMetadata;
   customMetadata?: Record<string, string>;
   contentType?: string;
+  /**
+   * Bytes buffered per part. Defaults to `PART_SIZE_BYTES`; `GRAB_CHUNK_BYTES`
+   * is passed in so one download chunk really is one R2 part. Clamped to R2's
+   * 5 MiB minimum.
+   */
+  partSizeBytes?: number;
+}
+
+/** Resolve the part size once, so the buffer loop and the part loop agree. */
+export function partSizeFor(requested?: number): number {
+  const value = Math.floor(requested ?? PART_SIZE_BYTES);
+  if (!Number.isFinite(value) || value <= 0) return PART_SIZE_BYTES;
+  return Math.max(MIN_PART_SIZE_BYTES, value);
 }
 
 /** Read a stream to the end, buffering at most `limit` bytes. */
@@ -72,8 +89,9 @@ export async function writeStreamToR2(
     ...(options.httpMetadata ?? {}),
     ...(options.contentType ? { contentType: options.contentType } : {}),
   };
+  const partSize = partSizeFor(options.partSizeBytes);
 
-  // Buffer the first (up to) PART_SIZE bytes: if the stream ends inside it we can
+  // Buffer the first (up to) one part: if the stream ends inside it we can
   // skip multipart entirely and do one atomic put().
   const reader = stream.getReader();
   const firstChunks: Uint8Array[] = [];
@@ -90,7 +108,7 @@ export async function writeStreamToR2(
       firstChunks.push(value);
       firstSize += value.byteLength;
     }
-    if (firstSize >= PART_SIZE_BYTES) break;
+    if (firstSize >= partSize) break;
   }
 
   if (streamDone) {
@@ -144,7 +162,7 @@ export async function writeStreamToR2(
       if (partNumber > MAX_PARTS) {
         throw new Error('R2 multipart upload exceeded the maximum number of parts');
       }
-      const { chunks, size, complete } = await readFully(remaining, PART_SIZE_BYTES);
+      const { chunks, size, complete } = await readFully(remaining, partSize);
       if (size > 0) {
         parts.push(await upload.uploadPart(partNumber, concat(chunks, size)));
         total += size;
