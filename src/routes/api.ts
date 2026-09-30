@@ -15,7 +15,7 @@ import { baseHeaders, grabConfig } from '../grab/config';
 import { safeUrl } from '../grab/guard';
 import { Budget, grabFetch } from '../grab/net';
 import { isManifestContentType } from '../grab/manifests';
-import { isMediaContentType } from '../grab/media-types';
+import { isErrorPageContentType, isMediaContentType, resolveFormat } from '../grab/media-types';
 import {
   defaultConcurrency,
   fileUrlTtlSeconds,
@@ -240,19 +240,23 @@ app.get('/api/preview', async (context) => {
   );
 
   const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
+  const normalizedType = contentType.split(';')[0].trim().toLowerCase();
+  const genericBinary = ['', 'application/octet-stream', 'binary/octet-stream', 'application/binary'].includes(normalizedType);
+  const inferredFormat = genericBinary ? resolveFormat(target.toString()) : null;
   const refuse = (message: string): never => {
     void response.body?.cancel().catch(() => undefined);
     throw badRequest(message);
   };
-  if (isManifestContentType(contentType) || /\.(?:m3u8|mpd)(\?|$)/i.test(target.pathname)) {
+  if (isManifestContentType(contentType) || /\.(?:m3u8?|mpd)(\?|$)/i.test(target.pathname)) {
     refuse('This source is an HLS/DASH manifest, not a single file: queue the download to get one playable .ts/.mp4.');
   }
-  if (!isMediaContentType(contentType)) {
-    refuse(`Refusing to proxy "${contentType.split(';')[0]}" - only media responses can be previewed.`);
+  if (isErrorPageContentType(contentType) || (!isMediaContentType(contentType) && !inferredFormat)) {
+    refuse(`Refusing to proxy "${normalizedType || 'unknown'}" - only media responses can be previewed.`);
   }
 
+  const previewContentType = inferredFormat?.contentType ?? contentType;
   const out = new Headers({
-    'content-type': contentType,
+    'content-type': previewContentType,
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
@@ -373,12 +377,27 @@ app.get('/api/files/:id/content', async (context) => {
 
   if (!object || !object.body) throw notFound(`Object ${file.objectKey} is missing from R2`);
 
+  const storedContentType = object.httpMetadata?.contentType ?? file.contentType;
+  const normalizedType = storedContentType.split(';')[0].trim().toLowerCase();
+  let inlineMediaType: string | null = null;
+  if (file.provider !== 'mock') {
+    if (normalizedType.startsWith('video/') || normalizedType.startsWith('audio/')) {
+      inlineMediaType = storedContentType;
+    } else if (['', 'application/octet-stream', 'binary/octet-stream', 'application/binary'].includes(normalizedType)) {
+      const format = resolveFormat(file.filename);
+      if (format && !format.manifest && (format.contentType.startsWith('video/') || format.contentType.startsWith('audio/'))) {
+        inlineMediaType = format.contentType;
+      }
+    }
+  }
+  const inline = context.req.query('inline') === '1' && inlineMediaType !== null;
   const headers = new Headers({
-    'content-type': object.httpMetadata?.contentType ?? file.contentType,
+    'content-type': inline ? inlineMediaType! : storedContentType,
     'content-length': String(range ? range.length : file.size),
     'accept-ranges': 'bytes',
     'cache-control': `private, max-age=${fileUrlTtlSeconds(env)}`,
-    'content-disposition': `attachment; filename="${file.filename.replace(/"/g, '')}"`,
+    'x-content-type-options': 'nosniff',
+    'content-disposition': `${inline ? 'inline' : 'attachment'}; filename="${file.filename.replace(/"/g, '')}"`,
   });
   if (object.etag) headers.set('etag', object.etag);
   if (range) {

@@ -59,6 +59,8 @@ export const jobOptionsSchema = z.object({
     .regex(/^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$/, 'prefix must be a safe object key prefix')
     .optional(),
   provider: z.string().trim().min(1).max(64).optional(),
+  /** Self-attestation required before sending a TikTok URL to an unofficial third party. */
+  thirdPartyConsent: z.boolean().optional(),
 });
 
 export const createJobSchema = z.object({

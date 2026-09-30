@@ -27,6 +27,11 @@ GRAB_MAX_VIDEOS=200
 GRAB_MAX_VIDEO_BYTES=3221225472
 GRAB_CHUNK_BYTES=8388608
 
+# Optional, unofficial one-post TikTok provider. Keep off unless you accept that
+# the TikTok URL is sent to SSSTik and you have the right to save the video.
+# It never logs in, solves captchas, or bypasses DRM; enable only after local review.
+TIKTOK_SSTIK_ENABLED=false
+
 # Authorized source (extractor) - leave empty to use the real link grabber.
 SOURCE_API_BASE_URL=
 SOURCE_API_TOKEN=

@@ -127,10 +127,23 @@ function renderStatus(): void {
   const providers = state.status?.downloadProviders ?? [];
   const anyAvailable = providers.some((provider) => provider.available);
   for (const provider of providers) {
-    const kindLabel = provider.kind === 'mock' ? 'mock' : provider.kind === 'http' ? 'real' : provider.kind;
+    const kindLabel =
+      provider.key === 'tiktok-ssstik'
+        ? 'unofficial third party'
+        : provider.kind === 'mock'
+          ? 'mock · synthetic only'
+          : provider.kind === 'http'
+            ? 'real'
+            : provider.kind;
     const providerChip = chip(
       `${kindLabel}: ${provider.key}${provider.available ? '' : ' (off)'}`,
-      provider.available ? 'ok' : anyAvailable ? 'muted' : 'error',
+      provider.available
+        ? provider.kind === 'mock' || provider.key === 'tiktok-ssstik'
+          ? 'warn'
+          : 'ok'
+        : anyAvailable
+          ? 'muted'
+          : 'error',
     );
     providerChip.title = provider.reason ?? '';
     badges.appendChild(providerChip);
@@ -211,9 +224,20 @@ function renderHint(): void {
  * `#EXT-X-KEY`) or `live` (a playlist that is still running). Mirrors the server-side
  * filter in `JobService`, so the list you see is the list that gets queued.
  */
+function tiktokSsstikAvailable(): boolean {
+  return state.status?.downloadProviders.some((provider) => provider.key === 'tiktok-ssstik' && provider.available) ?? false;
+}
+
+function tiktokSsstikSelected(): boolean {
+  return $<HTMLSelectElement>('opt-provider').value === 'tiktok-ssstik' && tiktokSsstikAvailable();
+}
+
 function episodeBlockReason(episode: EpisodeRecord): 'encrypted' | 'live' | 'listing' | null {
   const streams = episode.streams;
-  if (streams.length === 0 && episode.metadata.listOnly === true) return 'listing';
+  if (streams.length === 0 && episode.metadata.listOnly === true) {
+    if (episode.metadata.platform === 'tiktok' && tiktokSsstikSelected()) return null;
+    return 'listing';
+  }
   if (streams.length === 0) {
     if (episode.metadata.encrypted === true) return 'encrypted';
     if (episode.metadata.live === true) return 'live';
@@ -270,6 +294,56 @@ function episodeSize(episode: EpisodeRecord): number {
   return episode.streams.reduce((total, stream) => Math.max(total, stream.sizeBytes ?? 0), 0);
 }
 
+/** Pick a direct media file for browser preview; browsers cannot play an HLS/DASH manifest directly. */
+function directPreviewSource(episode: EpisodeRecord): string | null {
+  const stream = episode.streams.find((candidate) => {
+    if (!candidate.url || candidate.encrypted || candidate.live || candidate.kind === 'hls' || candidate.kind === 'dash') {
+      return false;
+    }
+    try {
+      return !/\.(?:m3u8?|mpd)$/i.test(new URL(candidate.url).pathname);
+    } catch {
+      return !/\.(?:m3u8?|mpd)(?:[?#]|$)/i.test(candidate.url);
+    }
+  });
+  return stream?.url ?? null;
+}
+
+function filePlayerKind(file: FileRecord): 'video' | 'audio' | null {
+  // The mock provider deliberately stores synthetic bytes, not a playable video.
+  if (file.provider === 'mock') return null;
+  const type = (file.contentType ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+  if (type.startsWith('video/')) return 'video';
+  if (type.startsWith('audio/')) return 'audio';
+  return null;
+}
+
+function createMediaPlayer(
+  kind: 'video' | 'audio',
+  src: string,
+  label: string,
+  poster?: string | null,
+): HTMLMediaElement {
+  const player = document.createElement(kind) as HTMLMediaElement;
+  player.className = 'media-player';
+  player.controls = true;
+  player.preload = 'none';
+  player.setAttribute('playsinline', '');
+  player.setAttribute('aria-label', label);
+  player.src = src;
+  if (kind === 'video' && poster) (player as HTMLVideoElement).poster = poster;
+  return player;
+}
+
+function setAnalysisResult(message: string, warning = false): void {
+  const result = $('analyze-result');
+  result.textContent = message
+    ? `${message}\n\nវិភាគគ្រាន់តែរកប្រភពវីដេអូប៉ុណ្ណោះ — មិនមែនមានន័យថាទាញយករួចទេ។`
+    : '';
+  result.hidden = !message;
+  result.classList.toggle('analysis-result-warn', warning);
+}
+
 // ---------------------------------------------------------------------------
 // Series + episode selection
 // ---------------------------------------------------------------------------
@@ -315,6 +389,9 @@ function renderSeries(): void {
 
   const blocked = state.episodes.filter(isEncryptedOnly).length;
   const listingCount = state.episodes.filter((episode) => episodeBlockReason(episode) === 'listing').length;
+  const tiktokListingCount = state.episodes.filter(
+    (episode) => episodeBlockReason(episode) === 'listing' && episode.metadata.platform === 'tiktok',
+  ).length;
   const protectedCount = state.episodes.filter((episode) => episodeBlockReason(episode) === 'encrypted').length;
   const liveCount = state.episodes.filter((episode) => episodeBlockReason(episode) === 'live').length;
   const queueNote = $('queue-note');
@@ -323,7 +400,9 @@ function renderSeries(): void {
       ? [
           protectedCount > 0 ? `${protectedCount} encrypted (DRM / #EXT-X-KEY): VTGrab never fetches keys or decrypts` : '',
           liveCount > 0 ? `${liveCount} live broadcast(s): no finished file to store yet` : '',
-          listingCount > 0 ? `${listingCount} listed for reference only: no authorized download source` : '',
+          listingCount > 0
+            ? `${listingCount} listed for reference only: no direct stream${tiktokListingCount > 0 && tiktokSsstikAvailable() ? '; select the explicit SSSTik third-party provider for eligible TikTok posts' : ''}`
+            : '',
           'these are listed but never queued',
         ]
         .filter(Boolean)
@@ -422,23 +501,57 @@ function renderEpisodes(): void {
     body.appendChild(meta);
 
     const source = episode.streams.find((stream) => stream.url)?.url ?? episode.sourceUrl;
+    const links = el('div', 'episode-links');
     if (source) {
-      const links = el('div', 'episode-links');
       const open = el('a', 'link', 'source') as HTMLAnchorElement;
       open.href = source;
       open.target = '_blank';
       open.rel = 'noopener noreferrer';
       links.appendChild(open);
-      if (!blocked) {
-        const preview = el('a', 'link', 'preview') as HTMLAnchorElement;
-        preview.href = `/api/preview?url=${encodeURIComponent(source)}`;
-        preview.target = '_blank';
-        preview.rel = 'noopener';
-        preview.title = 'Play it through the Worker (the media host only sees the Worker request, no cookies are sent)';
-        links.appendChild(preview);
-      }
-      body.appendChild(links);
     }
+
+    const previewSource = !blocked ? directPreviewSource(episode) : null;
+    if (previewSource) {
+      const preview = el('a', 'link', 'preview in new tab') as HTMLAnchorElement;
+      preview.href = api.sourcePreviewUrl(previewSource);
+      preview.target = '_blank';
+      preview.rel = 'noopener';
+      preview.title = 'Play through the guarded Worker proxy (no source-site cookies are sent)';
+      links.appendChild(preview);
+
+      const showPreview = el('button', 'link-button preview-toggle', 'Watch here');
+      showPreview.type = 'button';
+      let previewPanel: HTMLDivElement | null = null;
+      showPreview.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (previewPanel) {
+          previewPanel.remove();
+          previewPanel = null;
+          showPreview.textContent = 'Watch here';
+          return;
+        }
+        previewPanel = el('div', 'media-preview episode-preview');
+        const player = createMediaPlayer(
+          'video',
+          api.sourcePreviewUrl(previewSource),
+          `Preview ${episode.title}`,
+          episode.thumbnailUrl,
+        ) as HTMLVideoElement;
+        const note = el('p', 'muted small preview-error', 'Preview could not be played. The source may block preview; queue it and try the stored file after download.');
+        note.hidden = true;
+        player.addEventListener('error', () => {
+          note.hidden = false;
+        });
+        previewPanel.append(player, note);
+        body.appendChild(previewPanel);
+        showPreview.textContent = 'Hide preview';
+      });
+      links.appendChild(showPreview);
+    } else if (!blocked && episode.streams.some((stream) => stream.kind === 'hls' || stream.kind === 'dash')) {
+      links.appendChild(el('span', 'muted small', 'Adaptive stream — preview after download'));
+    }
+    if (links.childNodes.length > 0) body.appendChild(links);
 
     item.appendChild(checkbox);
     item.appendChild(body);
@@ -453,7 +566,10 @@ function onEpisodeClick(event: MouseEvent): void {
 
   if (event.shiftKey && state.anchorIndex !== null) {
     const ids = rangeIdsBetween(state.episodes, state.anchorIndex, index);
-    for (const id of ids) state.selected.add(id);
+    for (const id of ids) {
+      const episode = state.episodes.find((item) => item.id === id);
+      if (episode && !isEncryptedOnly(episode)) state.selected.add(id);
+    }
     state.selectionMode = 'range';
   } else {
     state.selectionMode = 'ids';
@@ -532,6 +648,15 @@ function renderJob(job: JobListItem): HTMLElement {
       }`,
     ),
   );
+  if (job.options?.provider) {
+    badges.appendChild(
+      el(
+        'span',
+        job.options.provider === 'mock' ? 'badge status-partial' : 'badge muted',
+        job.options.provider === 'mock' ? 'mock · synthetic, not a video' : `provider: ${job.options.provider}`,
+      ),
+    );
+  }
   badges.appendChild(el('span', 'badge muted', formatBytes(job.bytes)));
   header.appendChild(badges);
 
@@ -625,12 +750,18 @@ function renderFiles(): void {
   const list = $('files-list');
   clear(list);
   if (state.files.length === 0) {
-    list.appendChild(el('p', 'muted', 'No files stored in R2 yet.'));
+    list.appendChild(
+      el(
+        'p',
+        'muted',
+        'No downloads have finished yet. “Found” or “queued” is not the same as a saved video. Wait for the job to complete; files appear here automatically. / មិនទាន់មានវីដេអូដែលទាញយកចប់ទេ។',
+      ),
+    );
     return;
   }
   const table = el('table', 'files-table');
   const head = el('tr');
-  for (const label of ['File', 'Size', 'Quality', 'Provider', 'Stored', '']) {
+  for (const label of ['File', 'Size', 'Quality', 'Provider', 'Stored', 'Actions']) {
     head.appendChild(el('th', undefined, label));
   }
   table.appendChild(head);
@@ -640,17 +771,57 @@ function renderFiles(): void {
     row.appendChild(el('td', 'filename', file.filename));
     row.appendChild(el('td', undefined, formatBytes(file.size)));
     row.appendChild(el('td', undefined, file.quality ?? '—'));
-    row.appendChild(el('td', undefined, file.provider));
+    const providerCell = el('td');
+    if (file.provider === 'mock') {
+      providerCell.appendChild(chip('mock · synthetic only', 'warn'));
+      providerCell.appendChild(el('div', 'muted small', 'not a real video / មិនមែនវីដេអូពិត'));
+    } else {
+      providerCell.textContent = file.provider;
+    }
+    row.appendChild(providerCell);
     row.appendChild(el('td', 'muted small', formatTime(file.createdAt)));
-    const actions = el('td');
+
+    const actions = el('td', 'file-actions');
     const link = el('a', 'link', 'download') as HTMLAnchorElement;
     link.href = api.fileDownloadUrl(file.id);
     actions.appendChild(link);
+
+    const playerKind = filePlayerKind(file);
+    let previewRow: HTMLTableRowElement | null = null;
+    if (playerKind) {
+      previewRow = el('tr', 'file-preview-row');
+      previewRow.hidden = true;
+      const previewCell = el('td');
+      previewCell.colSpan = 6;
+      const panel = el('div', 'media-preview file-preview');
+      const player = createMediaPlayer(playerKind, api.filePreviewUrl(file.id), `Play ${file.filename}`);
+      const note = el('p', 'muted small preview-error', 'This browser could not play this format. You can still download the file.');
+      note.hidden = true;
+      player.addEventListener('error', () => {
+        note.hidden = false;
+      });
+      panel.append(player, note);
+      previewCell.appendChild(panel);
+      previewRow.appendChild(previewCell);
+
+      const play = el('button', 'link-button file-play', 'Play here');
+      play.type = 'button';
+      play.setAttribute('aria-expanded', 'false');
+      play.addEventListener('click', () => {
+        previewRow!.hidden = !previewRow!.hidden;
+        const isOpen = !previewRow!.hidden;
+        play.textContent = isOpen ? 'Hide player' : 'Play here';
+        play.setAttribute('aria-expanded', String(isOpen));
+      });
+      actions.appendChild(play);
+    }
+
     const remove = el('button', 'link-button danger', 'delete');
     remove.addEventListener('click', () => void runDeleteFile(file.id));
     actions.appendChild(remove);
     row.appendChild(actions);
     table.appendChild(row);
+    if (previewRow) table.appendChild(previewRow);
   }
   list.appendChild(table);
 }
@@ -672,6 +843,7 @@ async function runAnalyze(event: SubmitEvent): Promise<void> {
 
   const errorBox = $('analyze-error');
   errorBox.hidden = true;
+  setAnalysisResult('');
   if (!url) return;
 
   state.analyzing = true;
@@ -681,8 +853,7 @@ async function runAnalyze(event: SubmitEvent): Promise<void> {
     const result = await api.analyze(url, sourceKey, refresh, queueAll);
     state.series = result.series;
     state.episodes = result.episodes;
-    // Every video we found (and are allowed to grab) starts out selected: the point
-    // of "analyze this link" is "grab the videos on it".
+    // Preselect every item that can become a file; analyzing itself only finds sources.
     state.selected = new Set(
       result.episodes.filter((episode) => !isEncryptedOnly(episode)).map((episode) => episode.id),
     );
@@ -690,16 +861,58 @@ async function runAnalyze(event: SubmitEvent): Promise<void> {
     state.selectionMode = 'all';
     renderSeries();
     renderSelectionCount();
+
+    const foundCount = result.episodes.length;
+    const downloadableCount = result.episodes.filter((episode) => !isEncryptedOnly(episode)).length;
+    const sourceNote = `via ${result.extractor}${result.cached ? ' (cached result)' : ''}`;
     if (result.job) {
       state.details.set(result.job.job.id, result.job);
       state.expanded.add(result.job.job.id);
-      toast(`Queued ${result.job.job.totalItems} video(s) for download (job ${result.job.job.id})`, 'success');
+      const message =
+        `Found ${foundCount} video source(s) ${sourceNote}. Queued ${result.job.job.totalItems} for download ` +
+        `(job ${result.job.job.id}); this is not a saved video yet. Watch the job below. ` +
+        'Playable files appear in Downloaded files after the items complete.';
+      setAnalysisResult(message);
+      toast(`Found ${foundCount}; queued ${result.job.job.totalItems}. Download is not complete yet.`, 'info');
       await Promise.all([refreshJobs(), refreshFiles()]);
+    } else if (foundCount === 0) {
+      const message = `No video sources found ${sourceNote}. Check the link and the grabber diagnostics.`;
+      setAnalysisResult(message, true);
+      toast(message, 'info');
+    } else if (
+      queueAll &&
+      downloadableCount === 0 &&
+      result.episodes.length > 0 &&
+      result.episodes.every((episode) => episode.metadata.platform === 'tiktok' && episode.metadata.listOnly === true)
+    ) {
+      const message = tiktokSsstikAvailable()
+        ? `Found ${foundCount} TikTok post(s) ${sourceNote}. The official analyzer provides metadata only. ` +
+          'To try the optional unofficial path, choose “TikTok via SSSTik” under Provider, confirm rights and third-party URL sharing, then click Download all. One TikTok post becomes one job item; live service behavior is not guaranteed.'
+        : `Found ${foundCount} TikTok post(s) ${sourceNote}. The official analyzer provides metadata only. ` +
+          'An optional unofficial SSSTik adapter is present but off by default. Set TIKTOK_SSTIK_ENABLED=true on this deployment, reload, then choose that provider and confirm rights/third-party URL sharing. Live service behavior is not guaranteed.';
+      setAnalysisResult(message, true);
+      toast('TikTok posts are listed; see the instructions to enable or use the optional provider.', 'info');
+    } else if (queueAll && downloadableCount === 0) {
+      const message =
+        `Found ${foundCount} source(s) ${sourceNote}, but none can be downloaded (for example, DRM-protected, live, or listing-only). ` +
+        'See the labels on the video cards for details.';
+      setAnalysisResult(message, true);
+      toast('Sources found, but none is a downloadable file.', 'info');
+    } else if (!queueAll) {
+      const message =
+        `Found ${foundCount} video source(s) ${sourceNote}. No download was queued. ` +
+        'Review the list, then choose Download selected or Download all.';
+      setAnalysisResult(message);
+      toast(`Found ${foundCount} video source(s); no download was started.`, 'info');
     } else {
-      const found = `found ${result.episodes.length} video(s) via ${result.extractor}${result.cached ? ' (from cache)' : ''}`;
-      toast(queueAll ? `${found} - nothing new to queue` : found, 'success');
+      const message =
+        `Found ${foundCount} video source(s) ${sourceNote}, but no download job was created. ` +
+        'Select the available videos and start a download below.';
+      setAnalysisResult(message, true);
+      toast('Sources found, but no download job was created.', 'info');
     }
   } catch (error) {
+    setAnalysisResult('');
     showError(errorBox, error);
   } finally {
     state.analyzing = false;
@@ -716,6 +929,12 @@ function showError(node: HTMLElement, error: unknown): void {
 
 async function runCreateJob(mode: 'ids' | 'all'): Promise<void> {
   if (!state.series) return;
+  const provider = $<HTMLSelectElement>('opt-provider').value;
+  if (provider === 'tiktok-ssstik' && !$<HTMLInputElement>('third-party-consent').checked) {
+    $('job-create-status').textContent = 'Confirm rights and third-party URL sharing above first.';
+    toast('Confirm that you have permission and agree to send the TikTok URL to SSSTik.', 'error');
+    return;
+  }
   const seriesId = state.series.id;
   const ids =
     mode === 'all'
@@ -738,9 +957,9 @@ async function runCreateJob(mode: 'ids' | 'all'): Promise<void> {
     container: $<HTMLInputElement>('opt-container').value.trim() || 'mp4',
     concurrency: Number.parseInt($<HTMLInputElement>('opt-concurrency').value, 10) || 4,
     prefix: $<HTMLInputElement>('opt-prefix').value.trim() || 'vtgrab',
+    ...(provider ? { provider } : {}),
+    ...(provider === 'tiktok-ssstik' ? { thirdPartyConsent: true } : {}),
   };
-  const provider = $<HTMLSelectElement>('opt-provider').value;
-  if (provider) Object.assign(options, { provider });
 
   try {
     const detail = await api.createJob(
@@ -750,8 +969,11 @@ async function runCreateJob(mode: 'ids' | 'all'): Promise<void> {
     );
     state.details.set(detail.job.id, detail);
     state.expanded.add(detail.job.id);
-    status.textContent = `job ${detail.job.id} created (${detail.items.length} items)`;
-    toast(`Created job with ${detail.items.length} item(s)`, 'success');
+    status.textContent = `job ${detail.job.id} queued (${detail.items.length} items) — waiting for download`;
+    setAnalysisResult(
+      `Download queued as job ${detail.job.id} (${detail.items.length} item(s)); this is not a saved video yet. Watch Jobs below. Files appear here after the items complete.`,
+    );
+    toast(`Queued ${detail.items.length} item(s); download is not complete yet.`, 'info');
     await Promise.all([refreshJobs(), refreshFiles()]);
   } catch (error) {
     status.textContent = '';
@@ -795,13 +1017,37 @@ async function runDeleteFile(fileId: string): Promise<void> {
   }
 }
 
+function onDownloadProviderChange(): void {
+  const useSsstik = tiktokSsstikSelected();
+  $('third-party-warning').hidden = !useSsstik;
+  $('third-party-consent-row').hidden = !useSsstik;
+  $<HTMLInputElement>('third-party-consent').checked = false;
+
+  const previouslySelected = new Set(state.selected);
+  if (useSsstik && state.selectionMode === 'all') {
+    state.selected = new Set(state.episodes.filter((episode) => !isEncryptedOnly(episode)).map((episode) => episode.id));
+  } else {
+    state.selected = new Set(
+      [...previouslySelected].filter((id) => {
+        const episode = state.episodes.find((item) => item.id === id);
+        return episode !== undefined && !isEncryptedOnly(episode);
+      }),
+    );
+  }
+  state.anchorIndex = null;
+  renderSeries();
+}
+
 function applyRange(): void {
   const from = Number.parseInt($<HTMLInputElement>('range-from').value, 10) || 1;
   const to = Number.parseInt($<HTMLInputElement>('range-to').value, 10) || from;
   const range = normalizeRange(from, to);
   state.selected = new Set(
     state.episodes
-      .filter((episode) => episode.episodeIndex >= range.from && episode.episodeIndex <= range.to)
+      .filter(
+        (episode) =>
+          !isEncryptedOnly(episode) && episode.episodeIndex >= range.from && episode.episodeIndex <= range.to,
+      )
       .map((episode) => episode.id),
   );
   state.selectionMode = 'range';
@@ -883,9 +1129,10 @@ async function refreshFiles(): Promise<void> {
 
 export function mountApp(): void {
   $('analyze-form').addEventListener('submit', (event) => void runAnalyze(event));
+  $('opt-provider').addEventListener('change', onDownloadProviderChange);
 
   $('select-all').addEventListener('click', () => {
-    state.selected = new Set(state.episodes.map((episode) => episode.id));
+    state.selected = new Set(state.episodes.filter((episode) => !isEncryptedOnly(episode)).map((episode) => episode.id));
     state.selectionMode = 'all';
     renderEpisodes();
     renderSelectionCount();
@@ -901,7 +1148,7 @@ export function mountApp(): void {
   $('invert-selection').addEventListener('click', () => {
     const next = new Set<string>();
     for (const episode of state.episodes) {
-      if (!state.selected.has(episode.id)) next.add(episode.id);
+      if (!isEncryptedOnly(episode) && !state.selected.has(episode.id)) next.add(episode.id);
     }
     state.selected = next;
     state.selectionMode = 'ids';

@@ -8,8 +8,8 @@
       name="description"
       content="VTGrab analyzes an authorized series catalog and orchestrates download jobs on Cloudflare Workers (D1 + R2 + Queues)."
     />
-    <script type="module" crossorigin src="/assets/index-DeM3rO51.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-C9rwigbD.css">
+    <script type="module" crossorigin src="/assets/index-C-eAGyRK.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-I9mnjO7-.css">
   </head>
   <body>
     <div id="app">
@@ -51,6 +51,7 @@
             <button id="analyze-submit" class="primary" type="submit">Analyze</button>
           </form>
           <p id="analyze-hint" class="hint"></p>
+          <p id="analyze-result" class="analysis-result" role="status" aria-live="polite" hidden></p>
           <div id="analyze-error" class="error" hidden></div>
           <details id="analyze-diag" class="diag" hidden>
             <summary>what the grabber did on this URL</summary>
@@ -102,6 +103,13 @@
               <select id="opt-provider"></select>
             </label>
           </div>
+          <div id="third-party-warning" class="third-party-warning" hidden>
+            <strong>Unofficial third-party download.</strong> This sends each selected TikTok post URL to SSSTik and may stop working at any time. Use only videos you own or have permission to save. No TikTok login, captcha solving, or DRM bypass is used.
+          </div>
+          <label id="third-party-consent-row" class="checkbox-inline third-party-consent" hidden>
+            <input id="third-party-consent" type="checkbox" />
+            I have the right to download these posts and agree their URLs are sent to SSSTik.
+          </label>
           <div class="toolbar">
             <button id="download-selected" class="primary" type="button">
               Download selected (0)
@@ -131,9 +139,10 @@
 
         <section class="card" id="files-card">
           <div class="card-header">
-            <h2>Downloaded files (R2)</h2>
+            <h2>Downloaded files (R2) <span class="h2-sub">វីដេអូដែលបានទាញយករួច</span></h2>
             <button id="files-refresh" type="button">Refresh</button>
           </div>
+          <p class="hint" id="files-help">Analyze only finds video sources. A file appears here after its job item is completed; use “Play here” to watch compatible downloads. / វិភាគគ្រាន់តែរកប្រភព; វីដេអូបង្ហាញនៅទីនេះក្រោយទាញយកចប់។</p>
           <div id="files-list" class="files-list"></div>
         </section>
       </main>

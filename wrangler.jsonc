@@ -67,6 +67,8 @@
     // refused outside development). The rest are tuning knobs.
     // ---------------------------------------------------------------------
     "GRAB_ENABLED": "true",
+    // Unofficial TikTok adapter is deliberately off until an operator opts in.
+    "TIKTOK_SSTIK_ENABLED": "false",
     "GRAB_ALLOWED_HOSTS": "",
     "GRAB_DENIED_HOSTS": "",
     "GRAB_MAX_VIDEOS": "200",

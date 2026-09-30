@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { postJson, request, requestJson, testEnv, waitFor } from './helpers';
+import { postJson, request, requestJson, repository, testEnv, waitFor } from './helpers';
 import type { EpisodeRecord, FileRecord, JobDetail, SeriesRecord } from '../src/shared/types';
 
 async function completedJob(): Promise<JobDetail> {
@@ -46,6 +46,47 @@ describe('GET /api/files', () => {
     const buffer = new Uint8Array(await content.arrayBuffer());
     expect(buffer.byteLength).toBe(file!.size);
     expect(new TextDecoder().decode(buffer.subarray(0, 35))).toBe('VTGrab MOCK OBJECT - NOT REAL MEDIA');
+
+    // A mock .mp4 filename is not a real video: do not make it playable inline.
+    const mockInline = await request(`/api/files/${file!.id}/content?inline=1`);
+    expect(mockInline.headers.get('content-disposition')).toContain('attachment');
+    expect(mockInline.headers.get('content-type')).toBe('application/octet-stream');
+  });
+
+  it('serves stored media inline for the in-app player while keeping downloads as attachments', async () => {
+    const key = `inline-playback/${Date.now()}.mp4`;
+    const bytes = new TextEncoder().encode('tiny video fixture');
+    const object = await testEnv.FILES.put(key, bytes, {
+      httpMetadata: { contentType: 'application/octet-stream' },
+    });
+    const file = await repository().insertFile({
+      jobId: null,
+      jobItemId: null,
+      seriesId: null,
+      episodeId: null,
+      bucket: 'FILES',
+      objectKey: key,
+      filename: 'tiny-video.mp4',
+      contentType: 'application/octet-stream',
+      size: bytes.byteLength,
+      etag: object?.etag ?? null,
+      checksumSha256: null,
+      quality: 'source',
+      container: 'mp4',
+      durationSeconds: null,
+      provider: 'http-stream',
+      metadata: {},
+    });
+
+    const download = await request(`/api/files/${file.id}/content`);
+    expect(download.headers.get('content-disposition')).toContain('attachment');
+    expect(download.headers.get('content-type')).toBe('application/octet-stream');
+
+    const inline = await request(`/api/files/${file.id}/content?inline=1`);
+    expect(inline.status).toBe(200);
+    expect(inline.headers.get('content-disposition')).toContain('inline');
+    expect(inline.headers.get('content-type')).toBe('video/mp4');
+    expect(new Uint8Array(await inline.arrayBuffer())).toEqual(bytes);
   });
 
   it('supports HTTP range requests', async () => {

@@ -93,7 +93,11 @@ export const api = {
       body: JSON.stringify({ url, ...(sourceKey ? { sourceKey } : {}), refresh, queueAll }),
     }),
 
-  createJob: (seriesId: string, selection: SelectionDescriptor, options?: Partial<JobOptions>) =>
+  createJob: (
+    seriesId: string,
+    selection: SelectionDescriptor,
+    options?: Partial<JobOptions> & { thirdPartyConsent?: boolean },
+  ) =>
     request<JobDetail>('/api/jobs', {
       method: 'POST',
       body: JSON.stringify({ seriesId, selection, ...(options ? { options } : {}) }),
@@ -126,4 +130,10 @@ export const api = {
     request<null>(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   fileDownloadUrl: (id: string) => `/api/files/${encodeURIComponent(id)}/content`,
+
+  /** Inline media response for an in-page player; the normal download stays an attachment. */
+  filePreviewUrl: (id: string) => `/api/files/${encodeURIComponent(id)}/content?inline=1`,
+
+  /** Guarded Worker proxy used to preview a direct source before it is stored in R2. */
+  sourcePreviewUrl: (url: string) => `/api/preview?url=${encodeURIComponent(url)}`,
 };

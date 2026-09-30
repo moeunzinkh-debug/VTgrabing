@@ -108,7 +108,7 @@ export class HttpStreamDownloadProvider implements DownloadProvider {
     return {
       kind: 'stream',
       stream: streamFromGenerator(chunkedDownload(streamUrl, info, options)),
-      contentType: info.contentType || resolveFormat(streamUrl)?.contentType || 'application/octet-stream',
+      contentType: resolvedContentType(streamUrl, info.contentType),
       contentLength: info.totalBytes ?? undefined,
       container: resolveFormat(streamUrl)?.container ?? (info.contentType?.startsWith('video/mp4') ? 'mp4' : undefined),
     };
@@ -118,6 +118,15 @@ export class HttpStreamDownloadProvider implements DownloadProvider {
 // ---------------------------------------------------------------------------
 // internals
 // ---------------------------------------------------------------------------
+
+function resolvedContentType(url: string, contentType: string): string {
+  const normalized = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  if (['', 'application/octet-stream', 'binary/octet-stream', 'application/binary'].includes(normalized)) {
+    const format = resolveFormat(url);
+    if (format && !format.manifest) return format.contentType;
+  }
+  return contentType || resolveFormat(url)?.contentType || 'application/octet-stream';
+}
 
 function streamFromGenerator(generator: AsyncGenerator<Uint8Array, void, void>): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({

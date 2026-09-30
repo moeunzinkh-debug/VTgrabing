@@ -4,17 +4,20 @@ import type { ProviderDescriptor } from '../../shared/types';
 import { HttpStreamDownloadProvider } from './http-stream';
 import { MockDownloadProvider } from './mock';
 import { RemoteDownloadProvider } from './remote';
+import { TikTokSsstikDownloadProvider } from './tiktok-ssstik';
 import type { DownloadProvider } from './types';
 
 /**
  * Default provider order:
  *   1. `remote`      - only when the operator configured their own download service
- *   2. `http-stream` - the real grabber: the Worker downloads the bytes itself
- *   3. `mock`        - synthetic bytes, development/tests only
+ *   2. `http-stream`    - the real grabber: the Worker downloads the bytes itself
+ *   3. `tiktok-ssstik`  - explicitly selected, unofficial single-post adapter (never default)
+ *   4. `mock`           - synthetic bytes, development/tests only
  */
 const REGISTRY: DownloadProvider[] = [
   new RemoteDownloadProvider(),
   new HttpStreamDownloadProvider(),
+  new TikTokSsstikDownloadProvider(),
   new MockDownloadProvider(),
 ];
 
@@ -31,7 +34,8 @@ export function defaultDownloadProvider(env: Env): DownloadProvider {
   const configured = REGISTRY.filter((provider) => provider.isConfigured(env));
   const remote = configured.find((provider) => provider.kind === 'remote');
   if (remote) return remote;
-  const grabber = configured.find((provider) => provider.kind === 'http');
+  // Keep the third-party TikTok adapter explicit even when the feature flag is on.
+  const grabber = configured.find((provider) => provider.key === 'http-stream');
   if (grabber) return grabber;
   const mock = configured.find((provider) => provider.kind === 'mock');
   if (mock) return mock;
