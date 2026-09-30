@@ -198,7 +198,47 @@ git-ignored and therefore absent from a fresh clone. `Root directory = /` is
 correct: the Worker is not in a sub-folder of this repository.
 
 Save the settings, then push a commit (or press **Retry build**) - Cloudflare
-clones the repo, runs the build command, then the deploy command.
+clones the repo, runs the build command, then the deploy command. This only goes
+green once the account resources exist (see the next section).
+
+### Deploy from GitHub Actions (creates the resources for you)
+
+The repository contains `.github/workflows/deploy.yml`, which does the account
+setup that cannot be expressed in `wrangler.jsonc`:
+
+| Step                     | What it does                                                            |
+| ------------------------ | ----------------------------------------------------------------------- |
+| `npm run cf:provision`   | creates `vtgrab-db` (D1), `vtgrab-files` (R2) and `vtgrab-jobs` (Queues) if they are missing, and writes the real `database_id` into `wrangler.jsonc` |
+| `npm run db:migrate`     | applies `migrations/*.sql` to the remote D1 database                     |
+| `npm run deploy`         | pre-deploy check + typecheck + Vite build + `wrangler deploy`            |
+| persist step             | commits the real `database_id` back to `main` (once, `[skip ci]`) so the Cloudflare Git build uses the same config |
+
+It is idempotent - running it again changes nothing.
+
+**One-time setup** (in GitHub, never in the chat):
+
+`Settings → Secrets and variables → Actions → New repository secret`
+
+```
+Name:  CLOUDFLARE_API_TOKEN
+Value: a Cloudflare API token (dashboard -> My Profile -> API Tokens) with
+       Account: Account Settings (Read), Workers Scripts (Edit),
+                Workers R2 Storage (Edit), D1 (Edit), Queues (Edit)
+       User:    User Details (Read), Memberships (Read)
+```
+
+Then push to `main` (or run the workflow manually from the **Actions** tab).
+The account id is already in the workflow, so no second secret is needed unless
+the token belongs to another account (`CLOUDFLARE_ACCOUNT_ID`).
+
+Prefer to do it from your own machine instead?
+
+```bash
+npx wrangler login
+npm run cf:provision     # same script, same result
+npm run db:migrate
+npm run deploy
+```
 
 ### Reading a failed Workers Build
 
@@ -492,12 +532,11 @@ npm run deploy   # build + wrangler deploy
   ហើយ **build command** ជាអ្នកបង្កើត folder នោះ (ព្រោះ `dist/` មិនមានក្នុង git)។
 * ដូច្នេះ៖ Build command = `npm run build`, Deploy command = `npm run deploy`,
   Root directory = `/` (ព្រោះ `wrangler.jsonc` នៅឫសរៀងខាងលើរបស់ repo)។
-* មុន deploy ត្រូវបង្កើត resource ក្នុង account ម្តង៖
-  `npx wrangler d1 create vtgrab-db` (យក `database_id` ដាក់ចូល `wrangler.jsonc`),
-  `npx wrangler r2 bucket create vtgrab-files`,
-  `npx wrangler queues create vtgrab-jobs`។
-  បើមិនដូរតឹ `database_id` (នៅតែ `00000000-…`) deploy នឹងបរាជ័យ៖
-  `Invalid database UUID [code: 80000222]`។ `npm run deploy` នឹងព្រមានជាមុន។
+* បើអ្នកមិនចង់ធ្វើដោយដៃទេ កូដនេះមាន workflow
+  `.github/workflows/deploy.yml` ដែល **បង្កើត D1/R2/Queue ឲ្យស្វ័យប្រវត្តិ**
+  (`npm run cf:provision`) រួច migrate + deploy រៀងរាល់ពេល push ទៅ `main`។
+  អ្នកគ្រាន់តែបន្ថែម secret `CLOUDFLARE_API_TOKEN` ម្តងក្នុង GitHub
+  (Settings → Secrets and variables → Actions)។
 
 ---
 
