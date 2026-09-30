@@ -4,16 +4,19 @@ import type { ProviderDescriptor } from '../../shared/types';
 import { AuthorizedHttpExtractor } from './authorized';
 import { HttpSniffExtractor } from './http-sniff';
 import { MockExtractor } from './mock';
+import { TikTokExtractor } from './tiktok';
 import type { SourceExtractor } from './types';
 
 /**
  * Resolution order for `POST /api/analyze`:
  *   1. `authorized-http` - an operator configured catalog API (explicit opt-in)
- *   2. `http-sniff`      - the real link grabber: open the URL, find the videos
- *   3. `mock`            - synthetic data, development/tests only
+ *   2. `tiktok`          - tiktok.com links: public page -> mini-drama/normal + episode list
+ *   3. `http-sniff`      - the real link grabber: open the URL, find the videos
+ *   4. `mock`            - synthetic data, development/tests only
  */
 const REGISTRY: SourceExtractor[] = [
   new AuthorizedHttpExtractor(),
+  new TikTokExtractor(),
   new HttpSniffExtractor(),
   new MockExtractor(),
 ];

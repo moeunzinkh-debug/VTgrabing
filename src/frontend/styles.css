@@ -638,6 +638,30 @@ footer {
   border-color: var(--error);
 }
 
+.episode-listed {
+  cursor: default;
+}
+
+.verdict {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+
+.verdict-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.verdict p {
+  margin: 4px 0 0;
+}
+
 .diag {
   margin-top: 10px;
   border: 1px solid var(--border);

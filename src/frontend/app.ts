@@ -211,8 +211,9 @@ function renderHint(): void {
  * `#EXT-X-KEY`) or `live` (a playlist that is still running). Mirrors the server-side
  * filter in `JobService`, so the list you see is the list that gets queued.
  */
-function episodeBlockReason(episode: EpisodeRecord): 'encrypted' | 'live' | null {
+function episodeBlockReason(episode: EpisodeRecord): 'encrypted' | 'live' | 'listing' | null {
   const streams = episode.streams;
+  if (streams.length === 0 && episode.metadata.listOnly === true) return 'listing';
   if (streams.length === 0) {
     if (episode.metadata.encrypted === true) return 'encrypted';
     if (episode.metadata.live === true) return 'live';
@@ -226,6 +227,42 @@ function episodeBlockReason(episode: EpisodeRecord): 'encrypted' | 'live' | null
 
 function isEncryptedOnly(episode: EpisodeRecord): boolean {
   return episodeBlockReason(episode) !== null;
+}
+
+/** `EP 12` when the creator numbered it, `VIDEO` for a normal video, else `S01E03`. */
+function episodeTag(episode: EpisodeRecord, series: SeriesRecord | null): string {
+  const number = episode.metadata.episodeNumber;
+  if (typeof number === 'number' && Number.isFinite(number)) return `EP ${number}`;
+  if (series?.metadata?.contentKind === 'normal-video') return 'VIDEO';
+  return episodeLabel(episode.episodeIndex);
+}
+
+/** The TikTok analyzer's verdict (mini-drama or normal video) and the signals behind it. */
+function renderVerdict(header: HTMLElement): void {
+  const meta = state.series?.metadata ?? {};
+  const kind = meta.contentKind;
+  if (kind !== 'mini-drama' && kind !== 'normal-video') return;
+  const box = el('div', 'verdict');
+  box.dataset.kind = String(kind);
+  const row = el('div', 'verdict-row');
+  row.appendChild(
+    chip(kind === 'mini-drama' ? 'Mini-drama · ភាពយន្តខ្លី' : 'Normal video · វីដេអូធម្មតា', kind === 'mini-drama' ? 'ok' : 'muted'),
+  );
+  if (typeof meta.confidence === 'string') row.appendChild(chip(`${meta.confidence} confidence`, meta.confidence === 'low' ? 'warn' : 'muted'));
+  if (kind === 'mini-drama') {
+    const current = meta.currentEpisodeNumber;
+    const total = meta.totalEpisodes;
+    if (typeof current === 'number') {
+      row.appendChild(chip(`this link: EP ${current}${typeof total === 'number' ? ` / ${total}` : ''}`, 'muted'));
+    } else if (typeof total === 'number') {
+      row.appendChild(chip(`${total} episodes`, 'muted'));
+    }
+  }
+  box.appendChild(row);
+  const signals = Array.isArray(meta.signals) ? (meta.signals as unknown[]).map(String) : [];
+  if (signals.length > 0) box.appendChild(el('p', 'muted small', `Why: ${signals.join(' · ')}`));
+  if (typeof meta.listNote === 'string' && meta.listNote) box.appendChild(el('p', 'warn-text small', meta.listNote));
+  header.appendChild(box);
 }
 
 /** Largest advertised size across the renditions of one video. */
@@ -262,6 +299,10 @@ function renderSeries(): void {
   header.appendChild(meta);
   if (state.series.synopsis) header.appendChild(el('p', 'synopsis', state.series.synopsis));
   header.appendChild(el('p', 'muted small', state.series.sourceUrl));
+  if (typeof state.series.metadata?.resolvedUrl === 'string' && state.series.metadata.resolvedUrl !== state.series.sourceUrl) {
+    header.appendChild(el('p', 'muted small', `resolved: ${state.series.metadata.resolvedUrl}`));
+  }
+  renderVerdict(header);
 
   // What the grabber actually did on that URL (pages opened, hosts refused, ...).
   const diagnostics = Array.isArray(state.series.metadata?.diagnostics)
@@ -273,6 +314,7 @@ function renderSeries(): void {
   diagText.textContent = diagnostics.join('\n');
 
   const blocked = state.episodes.filter(isEncryptedOnly).length;
+  const listingCount = state.episodes.filter((episode) => episodeBlockReason(episode) === 'listing').length;
   const protectedCount = state.episodes.filter((episode) => episodeBlockReason(episode) === 'encrypted').length;
   const liveCount = state.episodes.filter((episode) => episodeBlockReason(episode) === 'live').length;
   const queueNote = $('queue-note');
@@ -281,6 +323,7 @@ function renderSeries(): void {
       ? [
           protectedCount > 0 ? `${protectedCount} encrypted (DRM / #EXT-X-KEY): VTGrab never fetches keys or decrypts` : '',
           liveCount > 0 ? `${liveCount} live broadcast(s): no finished file to store yet` : '',
+          listingCount > 0 ? `${listingCount} listed for reference only: no authorized download source` : '',
           'these are listed but never queued',
         ]
         .filter(Boolean)
@@ -340,7 +383,7 @@ function renderEpisodes(): void {
 
   for (const episode of state.episodes) {
     const blocked = isEncryptedOnly(episode);
-    const item = el('label', blocked ? 'episode episode-blocked' : 'episode');
+    const item = el('label', blocked ? (episodeBlockReason(episode) === 'listing' ? 'episode episode-listed' : 'episode episode-blocked') : 'episode');
     const checkbox = el('input') as HTMLInputElement;
     checkbox.type = 'checkbox';
     // A video we are not able to decrypt is shown but cannot be selected.
@@ -351,7 +394,7 @@ function renderEpisodes(): void {
     checkbox.addEventListener('click', onEpisodeClick);
 
     const body = el('div', 'episode-body');
-    body.appendChild(el('span', 'episode-index', episodeLabel(episode.episodeIndex)));
+    body.appendChild(el('span', 'episode-index', episodeTag(episode, state.series)));
     body.appendChild(el('span', 'episode-title', episode.title));
     const meta = el('div', 'episode-meta');
     meta.appendChild(el('span', undefined, formatDuration(episode.durationSeconds)));
@@ -365,11 +408,16 @@ function renderEpisodes(): void {
     if (episode.streams.length > 4) meta.appendChild(el('span', 'chip chip-muted', `+${episode.streams.length - 4} more`));
     const kind = episode.streams[0]?.kind;
     if (kind && kind !== 'progressive') meta.appendChild(el('span', 'chip chip-muted', kind.toUpperCase()));
+    if (episode.metadata.current === true) meta.appendChild(el('span', 'chip chip-ok', 'your link'));
     if (blocked) {
       const reason = episodeBlockReason(episode);
-      meta.appendChild(
-        el('span', 'chip chip-error', reason === 'live' ? 'live - not a file' : 'encrypted - not grabbable'),
-      );
+      if (reason === 'listing') {
+        meta.appendChild(el('span', 'chip chip-muted', 'listed only'));
+      } else {
+        meta.appendChild(
+          el('span', 'chip chip-error', reason === 'live' ? 'live - not a file' : 'encrypted - not grabbable'),
+        );
+      }
     }
     body.appendChild(meta);
 
