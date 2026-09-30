@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "vtgrabing",
-  "main": "src/index.ts",
+  "main": "worker/src/index.ts",
   "compatibility_date": "2025-09-25",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {

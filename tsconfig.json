@@ -18,6 +18,6 @@
     "noImplicitOverride": true,
     "useDefineForClassFields": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
-  "exclude": ["src/frontend"]
+  "include": ["worker/src/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
+  "exclude": []
 }

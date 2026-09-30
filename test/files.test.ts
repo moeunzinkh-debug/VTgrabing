@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { postJson, request, requestJson, testEnv, waitFor } from './helpers';
-import type { EpisodeRecord, FileRecord, JobDetail, SeriesRecord } from '../src/shared/types';
+import type { EpisodeRecord, FileRecord, JobDetail, SeriesRecord } from '../worker/src/shared/types';
 
 async function completedJob(): Promise<JobDetail> {
   const analyzed = (await (

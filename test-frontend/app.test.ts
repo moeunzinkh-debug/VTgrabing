@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../src/frontend/app';
-import type { EpisodeRecord, SeriesRecord } from '../src/shared/types';
+import type { EpisodeRecord, SeriesRecord } from '../worker/src/shared/types';
 
 const HTML = readFileSync(resolve(__dirname, '../src/frontend/index.html'), 'utf8');
 

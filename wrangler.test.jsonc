@@ -4,7 +4,7 @@
   // directory so the test suite never depends on a client build.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "vtgrab-test",
-  "main": "src/index.ts",
+  "main": "worker/src/index.ts",
   "compatibility_date": "2025-09-25",
   "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [

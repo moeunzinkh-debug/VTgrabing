@@ -17,8 +17,8 @@
   },
   "include": [
     "src/frontend/**/*.ts",
-    "src/shared/**/*.ts",
-    "src/core/selection.ts",
-    "src/core/ids.ts"
+    "worker/src/shared/**/*.ts",
+    "worker/src/core/selection.ts",
+    "worker/src/core/ids.ts"
   ]
 }

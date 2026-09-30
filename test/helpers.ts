@@ -1,6 +1,6 @@
 import { env, SELF } from 'cloudflare:test';
-import { Repository } from '../src/db/repository';
-import type { Env } from '../src/env';
+import { Repository } from '../worker/src/db/repository';
+import type { Env } from '../worker/src/env';
 
 export const testEnv: Env = env;
 export const repository = (): Repository => new Repository(env);

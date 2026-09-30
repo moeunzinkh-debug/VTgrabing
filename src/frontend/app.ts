@@ -1,7 +1,7 @@
 import './styles.css';
 import { api, ApiError } from './api';
-import { episodeLabel } from '../core/ids';
-import { normalizeRange, rangeIdsBetween } from '../core/selection';
+import { episodeLabel } from '../../worker/src/core/ids';
+import { normalizeRange, rangeIdsBetween } from '../../worker/src/core/selection';
 import type {
   EpisodeRecord,
   FileRecord,
@@ -11,7 +11,7 @@ import type {
   ProviderDescriptor,
   SeriesRecord,
   SystemStatus,
-} from '../shared/types';
+} from '../../worker/src/shared/types';
 
 // ---------------------------------------------------------------------------
 // State

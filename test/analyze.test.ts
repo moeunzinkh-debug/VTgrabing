@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { repository, requestJson, postJson } from './helpers';
-import type { EpisodeRecord, SeriesRecord } from '../src/shared/types';
+import type { EpisodeRecord, SeriesRecord } from '../worker/src/shared/types';
 
 interface AnalyzeResponse {
   series: SeriesRecord;

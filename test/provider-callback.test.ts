@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { hmacHex, callbackPayload } from '../src/providers/signature';
+import { hmacHex, callbackPayload } from '../worker/src/providers/signature';
 import { request, requestJson, seedJob, testEnv } from './helpers';
-import type { FileRecord, JobDetail } from '../src/shared/types';
+import type { FileRecord, JobDetail } from '../worker/src/shared/types';
 
 const SECRET = 'test-callback-secret';
 

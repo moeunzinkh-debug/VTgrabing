@@ -1,25 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AuthorizedHttpExtractor, allowedHosts, buildSeriesRequest } from '../src/providers/extract/authorized';
+import { AuthorizedHttpExtractor, allowedHosts, buildSeriesRequest } from '../worker/src/providers/extract/authorized';
 import {
   RemoteDownloadProvider,
   buildSubmitRequest,
   CALLBACK_TTL_SECONDS,
-} from '../src/providers/download/remote';
-import { resolveDownloadProvider } from '../src/providers/download/registry';
-import { resolveExtractor } from '../src/providers/extract/registry';
+} from '../worker/src/providers/download/remote';
+import { resolveDownloadProvider } from '../worker/src/providers/download/registry';
+import { resolveExtractor } from '../worker/src/providers/extract/registry';
 import {
   callbackPayload,
   hmacHex,
   signedCallbackUrl,
   timingSafeEqual,
   verifySignature,
-} from '../src/providers/signature';
-import { completeJobItemWithStream, finalizeJob, runMaintenance } from '../src/jobs/orchestrator';
-import { buildDownloadRequest, callbackOrigin } from '../src/jobs/orchestrator';
-import { Repository } from '../src/db/repository';
-import type { Env } from '../src/env';
+} from '../worker/src/providers/signature';
+import { completeJobItemWithStream, finalizeJob, runMaintenance } from '../worker/src/jobs/orchestrator';
+import { buildDownloadRequest, callbackOrigin } from '../worker/src/jobs/orchestrator';
+import { Repository } from '../worker/src/db/repository';
+import type { Env } from '../worker/src/env';
 import { requestJson, seedJob, testEnv } from './helpers';
-import type { JobDetail, JobRecord, JobItemRecord } from '../src/shared/types';
+import type { JobDetail, JobRecord, JobItemRecord } from '../worker/src/shared/types';
 
 const SECRET = 'test-callback-secret';
 
@@ -294,7 +294,7 @@ describe('RemoteDownloadProvider (production integration point)', () => {
     const status = await provider.status(result.providerRef, env);
     expect(status.status).toBe('ready');
 
-    const { fetchRemoteObject } = await import('../src/providers/download/remote');
+    const { fetchRemoteObject } = await import('../worker/src/providers/download/remote');
     const object = await fetchRemoteObject(status.downloadUrl!, env);
     expect(object.contentType).toBe('video/mp4');
 

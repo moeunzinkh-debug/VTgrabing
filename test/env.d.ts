@@ -1,4 +1,4 @@
-import type { Env as AppEnv } from '../src/env';
+import type { Env as AppEnv } from '../worker/src/env';
 import type { D1Migration } from '@cloudflare/vitest-pool-workers';
 
 // Make `import { env } from "cloudflare:test"` resolve to VTGrab's binding type,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, postJson, repository, requestJson, seedJob, testEnv, waitFor } from './helpers';
-import type { Env } from '../src/env';
-import type { EpisodeRecord, FileRecord, JobDetail, JobItemView, SeriesRecord } from '../src/shared/types';
+import type { Env } from '../worker/src/env';
+import type { EpisodeRecord, FileRecord, JobDetail, JobItemView, SeriesRecord } from '../worker/src/shared/types';
 
 interface AnalyzeResponse {
   series: SeriesRecord;
@@ -285,7 +285,7 @@ describe('environment helpers', () => {
     const env = testEnv;
     expect(env.MOCK_ENABLED).toBe('true');
     const production = { ...env, ENVIRONMENT: 'production', MOCK_ENABLED: 'false' } as Env;
-    const { mocksEnabled } = await import('../src/env');
+    const { mocksEnabled } = await import('../worker/src/env');
     expect(mocksEnabled(env)).toBe(true);
     expect(mocksEnabled(production)).toBe(false);
   });

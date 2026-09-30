@@ -7,8 +7,8 @@ import {
   resolveSelection,
   selectionFromEpisodes,
   toggleId,
-} from '../src/core/selection';
-import type { EpisodeRecord } from '../src/shared/types';
+} from '../worker/src/core/selection';
+import type { EpisodeRecord } from '../worker/src/shared/types';
 
 const episodes = [
   { id: 'ep_1', episodeIndex: 1 },

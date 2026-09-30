@@ -7,7 +7,7 @@ import type {
   SelectionDescriptor,
   SeriesRecord,
   SystemStatus,
-} from '../shared/types';
+} from '../../worker/src/shared/types';
 
 export class ApiError extends Error {
   constructor(

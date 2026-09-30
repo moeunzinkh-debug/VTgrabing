@@ -1,0 +1,25 @@
+{
+  // Same layout as Recap-ai/worker: the Worker code lives in worker/src and
+  // serves the Vite build (../dist). The root wrangler.jsonc points here too,
+  // so Cloudflare Workers Builds works from the repo root without extra setup.
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "vtgrabing",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "assets": { "directory": "../dist", "binding": "ASSETS", "run_worker_first": true },
+  "vars": {
+    "ENVIRONMENT": "production",
+    "MOCK_ENABLED": "false",
+    "MAX_ATTEMPTS": "3",
+    "DEFAULT_QUALITY": "1080p",
+    "DEFAULT_CONTAINER": "mp4",
+    "DEFAULT_CONCURRENCY": "4",
+    "FILE_URL_TTL_SECONDS": "3600",
+    "QUEUE_PUSH_BATCH_SIZE": "100",
+    "STALE_ITEM_MINUTES": "20",
+    "SOURCE_ALLOWED_HOSTS": "",
+    "PUBLIC_BASE_URL": ""
+  }
+}

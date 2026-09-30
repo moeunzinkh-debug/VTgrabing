@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PART_SIZE_BYTES, toChunkedStream, writeStreamToR2 } from '../src/providers/storage/r2';
+import { PART_SIZE_BYTES, toChunkedStream, writeStreamToR2 } from '../worker/src/providers/storage/r2';
 import { testEnv } from './helpers';
 
 function payload(size: number, seed = 7): Uint8Array {
