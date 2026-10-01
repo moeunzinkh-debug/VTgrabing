@@ -27,28 +27,60 @@ export function isTikTokHost(hostname: string): boolean {
 
 /** `vm.tiktok.com/ZM…`, `vt.tiktok.com/ZS…`, `www.tiktok.com/t/ZT…`, `m.tiktok.com/v/…`. */
 export function isShortTikTokUrl(url: URL): boolean {
-  const host = url.hostname.toLowerCase();
+  const host = url.hostname.toLowerCase().replace(/\.$/, '');
   if (host === 'vm.tiktok.com' || host === 'vt.tiktok.com') return true;
-  return /^\/(?:t|v)\/[\w-]+\/?$/.test(url.pathname) && isTikTokHost(host);
+  if (!isTikTokHost(host)) return false;
+  const match = /^\/(t|v)\/([\w-]+)\/?$/.exec(url.pathname);
+  if (!match) return false;
+  // `/v/<digits>` is the legacy long form: the number already is the video id, not a code.
+  return !(match[1] === 'v' && /^\d{6,25}$/.test(match[2]));
 }
 
 export interface TikTokUrlParts {
   videoId?: string;
   username?: string;
-  /** `video`, `photo`, `playlist`, `profile` or `unknown`. */
+  /** The playlist / collection id, when the link names one. */
+  playlistId?: string;
+  /** `video`, `photo`, `playlist` (also collections), `profile` or `unknown`. */
   kind: 'video' | 'photo' | 'playlist' | 'profile' | 'unknown';
 }
 
+/** A malformed `%` escape must not turn a pasted link into an exception. */
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+// TikTok sometimes puts a locale in front of the path (`/en/@user/video/…`).
+const LOCALE = '(?:/[a-z]{2}(?:-[a-zA-Z]{2,4})?)?';
+const VIDEO_PATH = new RegExp(`^${LOCALE}/@([^/]*)/(video|photo)/(\\d{6,25})`);
+const LEGACY_VIDEO_PATH = new RegExp(`^${LOCALE}/(?:v|embed(?:/v2)?|player/v1|share/video)/(\\d{6,25})`);
+// `/playlist/<name>-<id>` is the older spelling, `/collection/<name>-<id>` the current one.
+const PLAYLIST_PATH = new RegExp(`^${LOCALE}/@([^/]+)/(?:playlist|collection|series|mix)/([^/?#]+)`);
+const PROFILE_PATH = new RegExp(`^${LOCALE}/@([^/]+)/?$`);
+
 export function parseTikTokUrl(url: URL): TikTokUrlParts {
   const path = url.pathname;
-  const video = /^\/@([^/]+)\/(video|photo)\/(\d{6,25})/.exec(path);
-  if (video) return { username: decodeURIComponent(video[1]), videoId: video[3], kind: video[2] as 'video' | 'photo' };
-  const legacy = /^\/(?:v|embed(?:\/v2)?|player\/v1)\/(\d{6,25})/.exec(path);
+  const video = VIDEO_PATH.exec(path);
+  if (video) {
+    return {
+      username: video[1] ? safeDecode(video[1]) : undefined,
+      videoId: video[3],
+      kind: video[2] as 'video' | 'photo',
+    };
+  }
+  const legacy = LEGACY_VIDEO_PATH.exec(path);
   if (legacy) return { videoId: legacy[1], kind: 'video' };
-  const playlist = /^\/@([^/]+)\/playlist\/[^/]*?-?(\d{6,25})/.exec(path);
-  if (playlist) return { username: decodeURIComponent(playlist[1]), kind: 'playlist' };
-  const profile = /^\/@([^/]+)\/?$/.exec(path);
-  if (profile) return { username: decodeURIComponent(profile[1]), kind: 'profile' };
+  const playlist = PLAYLIST_PATH.exec(path);
+  if (playlist) {
+    const id = /(?:^|-)(\d{6,25})$/.exec(safeDecode(playlist[2]))?.[1];
+    return { username: safeDecode(playlist[1]), playlistId: id, kind: 'playlist' };
+  }
+  const profile = PROFILE_PATH.exec(path);
+  if (profile) return { username: safeDecode(profile[1]), kind: 'profile' };
   return { kind: 'unknown' };
 }
 
@@ -78,6 +110,12 @@ function linkCanonical(html: string): string | undefined {
   return undefined;
 }
 
+/** `<meta http-equiv="refresh" content="0; url=…">`: the plainest interstitial redirect. */
+function metaRefreshTarget(html: string): string | undefined {
+  const match = /<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["'][^"']*?url\s*=\s*['"]?([^"'>\s]+)/i.exec(html);
+  return match?.[1] ? decodeEntities(match[1]).trim() || undefined : undefined;
+}
+
 function refFromUrl(raw: string | undefined): TikTokVideoRef | null {
   if (!raw) return null;
   let url: URL;
@@ -93,32 +131,67 @@ function refFromUrl(raw: string | undefined): TikTokVideoRef | null {
 }
 
 /**
+ * A login / consent redirect keeps the page the visitor wanted in a query parameter
+ * (`/login?redirect_url=https%3A%2F%2Fwww.tiktok.com%2F%40a%2Fvideo%2F123`).
+ */
+export function findVideoRefInUrl(url: URL): TikTokVideoRef | null {
+  for (const key of ['redirect_url', 'redirectUrl', 'redirect', 'target', 'url', 'next']) {
+    const ref = refFromUrl(url.searchParams.get(key) ?? undefined);
+    if (ref) return ref;
+  }
+  return null;
+}
+
+/** JSON-in-HTML writes slashes as `\/` or `\u002F`; undo that so URLs in script strings match. */
+function unescapeJsonSlashes(text: string): string {
+  return text.replace(/\\u002f/gi, '/').replace(/\\\//g, '/');
+}
+
+export interface FindVideoRefOptions {
+  /**
+   * Also accept a video URL that is merely mentioned in the text, provided the text
+   * names exactly one distinct video (default). A page that mentions several
+   * (a feed, a "related videos" list, the home page) is never trusted to be about any
+   * one of them, so `false` limits the search to explicit canonical pointers.
+   */
+  scanText?: boolean;
+}
+
+/**
  * Recover which video a page / embed snippet is about when the request URL alone does
  * not say so (short link that never redirected, oEmbed response, meta-tag fallback):
- * explicit canonical pointers first (og:url, al:web:url, rel=canonical, embed `cite`),
- * then embed attributes (`data-video-id`), then the first absolute TikTok video URL in
- * the text (short-link interstitials and the oEmbed `html` field carry the long URL in
- * JS strings / anchors).
+ * explicit canonical pointers first (og:url, al:web:url, rel=canonical, meta refresh,
+ * embed `cite`), then embed attributes (`data-video-id`), then - only when the text
+ * names a single video - a bare TikTok video URL (short-link interstitials and the
+ * oEmbed `html` field carry the long URL in JS strings / anchors).
  */
-export function findVideoRefInHtml(html: string): TikTokVideoRef | null {
+export function findVideoRefInHtml(html: string, options: FindVideoRefOptions = {}): TikTokVideoRef | null {
   if (!html) return null;
-  for (const raw of [metaContent(html, 'og:url'), metaContent(html, 'al:web:url'), linkCanonical(html)]) {
+  const text = unescapeJsonSlashes(html);
+  for (const raw of [metaContent(text, 'og:url'), metaContent(text, 'al:web:url'), linkCanonical(text), metaRefreshTarget(text)]) {
     const ref = refFromUrl(raw);
     if (ref) return ref;
   }
-  const cite = /cite\s*=\s*["']([^"']+)["']/i.exec(html);
+  const cite = /cite\s*=\s*["']([^"']+)["']/i.exec(text);
   const cited = refFromUrl(cite?.[1] ? decodeEntities(cite[1]) : undefined);
   if (cited) return cited;
-  const dataId = /data-video-id\s*=\s*["']?(\d{6,25})["'\s>]/i.exec(html);
+  const dataId = /data-video-id\s*=\s*["']?(\d{6,25})["'\s>]/i.exec(text);
   if (dataId?.[1]) {
-    const username = /data-username\s*=\s*["']([^"']+)["']/i.exec(html)?.[1];
+    const username = /data-username\s*=\s*["']([^"']+)["']/i.exec(text)?.[1];
     return { id: dataId[1], username, url: canonicalVideoUrl(username, dataId[1]) };
   }
-  for (const match of html.matchAll(/https?:\/\/[^\s"'<>\\)]+/g)) {
+  if (options.scanText === false) return null;
+
+  const named = new Map<string, TikTokVideoRef>();
+  for (const match of text.matchAll(/https?:\/\/[^\s"'<>\\)]+/g)) {
     const found = refFromUrl(decodeEntities(match[0]));
-    if (found) return found;
+    if (!found) continue;
+    const known = named.get(found.id);
+    // The same video can be written with and without its username; keep the richer one.
+    if (!known || (!known.username && found.username)) named.set(found.id, found);
+    if (named.size > 1) return null;
   }
-  return null;
+  return named.size === 1 ? [...named.values()][0] : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,8 +293,11 @@ export interface TikTokVideoInfo {
   playlist?: TikTokPlaylistRef;
   /** A field that explicitly labels the post as a drama / series (strongest signal). */
   dramaField?: string;
-  /** Where the data came from: embedded page JSON, meta tags or oEmbed. */
-  origin: 'page-json' | 'meta' | 'oembed';
+  /**
+   * Where the data came from: embedded page JSON, meta tags, oEmbed, or `link` when
+   * TikTok gave nothing and only the video id written in the URL is known.
+   */
+  origin: 'page-json' | 'meta' | 'oembed' | 'link';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -370,9 +446,23 @@ function findPlaylist(root: Record<string, unknown>, item: Record<string, unknow
       }
     }
   }
+  const found: TikTokPlaylistRef[] = [];
   for (const [source, value] of candidates) {
     const playlist = readPlaylist(value, source);
-    if (playlist) return { playlist, dramaField };
+    if (playlist) found.push(playlist);
+  }
+  if (found.length > 0) {
+    // The items, the id and the name may sit in different records of the same scope
+    // (`itemList` beside a nested `collectionInfo`): take the fullest list, then fill
+    // whatever it lacks from the others.
+    const richest = found.reduce((best, next) => (next.items.length > best.items.length ? next : best));
+    const playlist: TikTokPlaylistRef = {
+      ...richest,
+      id: richest.id ?? found.find((entry) => entry.id)?.id,
+      name: richest.name ?? found.find((entry) => entry.name)?.name,
+      total: richest.total ?? found.find((entry) => entry.total !== undefined)?.total,
+    };
+    return { playlist, dramaField };
   }
   // Only a bare id on the item ("playlistId": "…"): we know there is a playlist, not its contents.
   const bareId = item ? str(item.playlistId) ?? str(item.collectionId) ?? str(item.mixId) : undefined;
@@ -386,11 +476,61 @@ function isoFromCreateTime(value: unknown): string | undefined {
   return new Date(seconds * 1000).toISOString();
 }
 
-/** Read everything useful out of the public HTML of a video page. */
-export function parseVideoPage(html: string, pageUrl: URL): TikTokVideoInfo | null {
+/**
+ * TikTok's stock tags for a page that is not about one video (home page, bot-check
+ * and consent pages, removed videos). Used as a title they would be a lie.
+ */
+const GENERIC_TIKTOK_TEXT =
+  /make your day|trends start here|watch and discover millions of personalized short videos|^\s*tiktok\s*$/i;
+
+export function isGenericTikTokText(text: string | undefined | null): boolean {
+  return !!text && GENERIC_TIKTOK_TEXT.test(text);
+}
+
+/** `statusCode` of the page's video-detail scope when it is not 0 (private, removed, blocked...). */
+export interface VideoDetailStatus {
+  code: number;
+  message?: string;
+}
+
+function readVideoDetailStatus(root: Record<string, unknown>): VideoDetailStatus | null {
+  const scope = asRecord(root.__DEFAULT_SCOPE__);
+  if (!scope) return null;
+  for (const [key, value] of Object.entries(scope)) {
+    if (!/video-detail/i.test(key)) continue;
+    const record = asRecord(value);
+    const code = int(record?.statusCode);
+    if (code !== undefined && code !== 0) return { code, message: str(record?.statusMsg) };
+  }
+  return null;
+}
+
+/** What one page told us, plus why it told us nothing when it did not. */
+export interface VideoPageReading {
+  info: TikTokVideoInfo | null;
+  /** Set when TikTok itself says the video cannot be shown (so its tags are not the video's). */
+  status: VideoDetailStatus | null;
+  /** Human readable reasons for an empty / limited reading, for the diagnostics. */
+  notes: string[];
+}
+
+/**
+ * Read everything useful out of the public HTML of a video page.
+ *
+ * `requested` is what the *request* named (the resolved link). It matters when the page
+ * answered from a different URL than the one asked for - TikTok redirects a walled
+ * video to its home or login page, whose tags describe TikTok, not the video - so the
+ * id and username of the link are never lost, and a page that is demonstrably about
+ * something else is not mistaken for the video.
+ */
+export function inspectVideoPage(html: string, pageUrl: URL, requested?: TikTokUrlParts): VideoPageReading {
   const urlParts = parseTikTokUrl(pageUrl);
+  const wantedId = urlParts.videoId ?? requested?.videoId;
+  const knownUsername = urlParts.username ?? requested?.username;
+  const notes: string[] = [];
   const root = readEmbeddedJson(html);
-  const item = root ? findItemStruct(root, urlParts.videoId) : null;
+  const item = root ? findItemStruct(root, wantedId) : null;
+  const status = root ? readVideoDetailStatus(root) : null;
 
   if (root && item) {
     const author = asRecord(item.author);
@@ -411,35 +551,83 @@ export function parseVideoPage(html: string, pageUrl: URL): TikTokVideoInfo | nu
     }
     const { playlist, dramaField } = findPlaylist(root, item);
     return {
-      id: str(item.id) ?? urlParts.videoId,
-      caption,
-      username: str(author?.uniqueId) ?? (typeof item.author === 'string' ? item.author : undefined) ?? urlParts.username,
-      nickname: str(author?.nickname),
-      durationSeconds: int(video?.duration),
-      cover: str(video?.cover) ?? str(video?.originCover),
-      createdAt: isoFromCreateTime(item.createTime),
-      hashtags: [...tags],
-      playlist,
-      dramaField,
-      origin: 'page-json',
+      status,
+      notes,
+      info: {
+        id: str(item.id) ?? wantedId,
+        caption,
+        username: str(author?.uniqueId) ?? (typeof item.author === 'string' ? item.author : undefined) ?? knownUsername,
+        nickname: str(author?.nickname),
+        durationSeconds: int(video?.duration),
+        cover: str(video?.cover) ?? str(video?.originCover),
+        createdAt: isoFromCreateTime(item.createTime),
+        hashtags: [...tags],
+        playlist,
+        dramaField,
+        origin: 'page-json',
+      },
     };
   }
 
-  const caption = metaContent(html, 'og:description') ?? metaContent(html, 'description') ?? metaContent(html, 'og:title');
-  if (caption) {
-    // The request URL may be a short link that never redirected; the page's own
-    // canonical pointers usually still name the video.
-    const ref = urlParts.videoId ? null : findVideoRefInHtml(html);
-    return {
-      id: urlParts.videoId ?? ref?.id,
+  if (status) {
+    // The page's own JSON says "no video here": its Open Graph tags are TikTok's stock
+    // text, never this video's caption.
+    notes.push(`TikTok reports this video as unavailable (statusCode ${status.code}${status.message ? `: ${status.message}` : ''})`);
+    return { info: null, status, notes };
+  }
+
+  // A playlist / collection page that lists its items in the embedded data.
+  if (root && !wantedId) {
+    const { playlist, dramaField } = findPlaylist(root, null);
+    if (playlist && playlist.items.length > 0) {
+      return {
+        status,
+        notes,
+        info: { caption: '', username: knownUsername, hashtags: [], playlist, dramaField, origin: 'page-json' },
+      };
+    }
+  }
+
+  const caption = [metaContent(html, 'og:description'), metaContent(html, 'description'), metaContent(html, 'og:title')].find(
+    (text): text is string => !!text && !isGenericTikTokText(text),
+  );
+  if (!caption) {
+    notes.push('page carries no video data and only TikTok\'s generic tags (bot check, login wall or changed layout)');
+    return { info: null, status, notes };
+  }
+  // The tags only describe the video when the page is demonstrably about it: its own URL
+  // names it, or an explicit canonical pointer (og:url, canonical, refresh) does.
+  const ref = urlParts.videoId ? null : findVideoRefInHtml(html, { scanText: false });
+  const id = urlParts.videoId ?? ref?.id;
+  if (!id) {
+    notes.push('page tags do not name a video (TikTok sent the visitor somewhere else); ignored');
+    return { info: null, status, notes };
+  }
+  if (requested?.videoId && id !== requested.videoId) {
+    notes.push(`page is about a different video (${id}); ignored`);
+    return { info: null, status, notes };
+  }
+  return {
+    status,
+    notes,
+    info: {
+      id,
       caption,
-      username: urlParts.username ?? ref?.username,
+      username: urlParts.username ?? ref?.username ?? requested?.username,
       hashtags: hashtagsOf(caption),
       cover: metaContent(html, 'og:image'),
       origin: 'meta',
-    };
-  }
-  return null;
+    },
+  };
+}
+
+export function parseVideoPage(html: string, pageUrl: URL): TikTokVideoInfo | null {
+  return inspectVideoPage(html, pageUrl).info;
+}
+
+/** All TikTok knows about a link we could not read: the id (and user) the URL itself carries. */
+export function linkOnlyInfo(parts: Pick<TikTokUrlParts, 'videoId' | 'username'>): TikTokVideoInfo {
+  return { id: parts.videoId, username: parts.username, caption: '', hashtags: [], origin: 'link' };
 }
 
 /** Public oEmbed (`https://www.tiktok.com/oembed?url=…`): title, author, thumbnail. */
@@ -471,7 +659,8 @@ export function parseOEmbed(json: unknown, pageUrl: URL): TikTokVideoInfo | null
 // classification
 // ---------------------------------------------------------------------------
 
-export type ContentKind = 'mini-drama' | 'normal-video';
+/** `unknown` = TikTok gave no data, so the tool cannot say which of the two it is. */
+export type ContentKind = 'mini-drama' | 'normal-video' | 'unknown';
 export type Confidence = 'high' | 'medium' | 'low';
 
 export interface Classification {
@@ -490,7 +679,30 @@ export const DRAMA_TAGS = new Set([
   'ละครสั้น', 'phimngan', 'dramapendek', 'dramacina', 'drama', 'ភាពយន្តខ្លី',
 ]);
 
+export const LINK_ONLY_NOTE =
+  'TikTok gave VTGrab no public data for this link (bot check or region block), so only the link itself is listed: ' +
+  'the title, episode number and series are unknown. The video id comes from the link, so the optional SSSTik ' +
+  'provider (when enabled on this deployment) can still try it.';
+
 export function classify(info: TikTokVideoInfo): Classification {
+  if (info.origin === 'link') {
+    return {
+      kind: 'unknown',
+      confidence: 'low',
+      score: 0,
+      signals: ['only the link was available: TikTok returned no title, hashtags or series data'],
+    };
+  }
+  // The link itself was a playlist / collection and its page listed the items.
+  if (!info.id && info.playlist && info.playlist.items.length > 0) {
+    const count = Math.max(info.playlist.total ?? 0, info.playlist.items.length);
+    return {
+      kind: 'mini-drama',
+      confidence: 'medium',
+      score: 3,
+      signals: [`link is a playlist / collection${info.playlist.name ? ` "${info.playlist.name}"` : ''} of ${count} videos`],
+    };
+  }
   const signals: string[] = [];
   let score = 0;
   let strong = false;
@@ -569,6 +781,14 @@ export function analyzeVideo(info: TikTokVideoInfo, fallbackUsername?: string): 
   const videoId = info.id;
 
   const currentTitleBase = cleanTitle(info.caption);
+
+  if (classification.kind === 'unknown') {
+    const title = username ? `@${username} video ${videoId ?? ''}`.trim() : `TikTok video ${videoId ?? ''}`.trim();
+    const episodes: TikTokEpisode[] = videoId
+      ? [{ index: 1, videoId, title, url: canonicalVideoUrl(username, videoId), current: true }]
+      : [];
+    return { kind: 'unknown', classification, title, videoId, username, episodes, listComplete: false, listNote: LINK_ONLY_NOTE };
+  }
 
   if (classification.kind === 'normal-video') {
     const title = currentTitleBase || (username ? `@${username} video ${videoId ?? ''}`.trim() : `TikTok video ${videoId ?? ''}`.trim());

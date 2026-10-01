@@ -283,6 +283,19 @@ button.primary {
   word-break: break-word;
 }
 
+.error p {
+  margin: 0 0 6px;
+}
+
+.error .error-hint {
+  color: var(--text);
+}
+
+.error .error-diag {
+  margin-top: 8px;
+  color: var(--muted);
+}
+
 .muted {
   color: var(--muted);
 }
