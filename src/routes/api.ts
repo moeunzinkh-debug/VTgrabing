@@ -133,7 +133,10 @@ app.post('/api/analyze', async (context) => {
 
   if (!input.refresh) {
     const cached = await repo.getSeriesBySourceUrl(url.toString());
-    if (cached) {
+    // A degraded listing (the analyzer could only list the bare link because the host
+    // refused it) is never served from the cache: the refusal may be temporary, and an
+    // old "nothing could be read" answer must not hide a link that works now.
+    if (cached && cached.metadata?.degraded !== true) {
       const episodes = await repo.listEpisodes(cached.id);
       const job = input.queueAll && episodes.some((episode) => !isListOnly(episode))
         ? await autoQueue(env, repo, cached.id)

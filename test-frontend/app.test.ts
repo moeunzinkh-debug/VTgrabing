@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mountApp } from '../src/frontend/app';
+import { extractUrl, mountApp } from '../src/frontend/app';
 import type { EpisodeRecord, FileRecord, SeriesRecord } from '../src/shared/types';
 
 const HTML = readFileSync(resolve(__dirname, '../src/frontend/index.html'), 'utf8');
@@ -610,4 +610,196 @@ describe('VTGrab frontend', () => {
     expect(body.options.thirdPartyConsent).toBe(true);
   });
 
+
+  describe('analyze input and failures', () => {
+    const SHARE = "Check out Drama House's video! https://vt.tiktok.com/ZSbADyPoy/ #fyp #minidrama";
+
+    it('pulls the link out of pasted TikTok share text', () => {
+      expect(extractUrl(SHARE)).toBe('https://vt.tiktok.com/ZSbADyPoy/');
+      expect(extractUrl('  https://vm.tiktok.com/ZM1/  ')).toBe('https://vm.tiktok.com/ZM1/');
+      // sentence punctuation and brackets are not part of the link
+      expect(extractUrl('look (https://www.tiktok.com/@a/video/7300000000000000012).')).toBe('https://www.tiktok.com/@a/video/7300000000000000012');
+      expect(extractUrl('see https://vt.tiktok.com/ZS1/, then reply')).toBe('https://vt.tiktok.com/ZS1/');
+      // curly quotes around a link, as chat apps paste it
+      expect(extractUrl('“https://vt.tiktok.com/ZS1/”')).toBe('https://vt.tiktok.com/ZS1/');
+      // the first link wins, across lines
+      expect(extractUrl('a https://vt.tiktok.com/ZS1/\nb https://vt.tiktok.com/ZS2/')).toBe('https://vt.tiktok.com/ZS1/');
+      // a query string stays intact
+      expect(extractUrl('x https://www.tiktok.com/@a/video/7300000000000000012?lang=en&_r=1 y')).toBe(
+        'https://www.tiktok.com/@a/video/7300000000000000012?lang=en&_r=1',
+      );
+      // nothing to extract: the text is left for the API to judge
+      expect(extractUrl('vt.tiktok.com/ZS1/')).toBe('vt.tiktok.com/ZS1/');
+      expect(extractUrl('   ')).toBe('');
+    });
+
+    it('accepts pasted share text in the box (a type=url field would block the submit before any code runs)', () => {
+      document.documentElement.innerHTML = HTML;
+      const input = $<HTMLInputElement>('analyze-url');
+      input.value = SHARE;
+      expect(input.checkValidity()).toBe(true);
+    });
+
+    it('analyzes the link found in pasted share text and shows the link that was used', async () => {
+      mountApp();
+      await flush();
+      const input = $<HTMLInputElement>('analyze-url');
+      input.value = SHARE;
+      $('analyze-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      const analyzeCall = calls.find((call) => call.url === '/api/analyze');
+      expect(JSON.parse(String(analyzeCall!.init?.body)).url).toBe('https://vt.tiktok.com/ZSbADyPoy/');
+      expect(input.value).toBe('https://vt.tiktok.com/ZSbADyPoy/');
+    });
+
+    it('explains a failed TikTok link: reason in Khmer plus the analyzer\'s steps under "technical details"', async () => {
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('/api/sources')) return jsonResponse(sources);
+        if (url.startsWith('/api/analyze')) {
+          return jsonResponse(
+            {
+              error: {
+                code: 'bad_request',
+                message: 'This is a TikTok playlist / collection link.',
+                details: {
+                  reason: 'playlist-link',
+                  resolvedUrl: 'https://www.tiktok.com/@a/collection/Wife-7665668414573546258',
+                  diagnostics: [
+                    'short link vt.tiktok.com/ZS1/ [default headers]: HTTP 302 -> www.tiktok.com/@a/collection/Wife-7665668414573546258',
+                    'page had no embedded video data',
+                  ],
+                },
+              },
+            },
+            400,
+          );
+        }
+        return jsonResponse({ items: [], total: 0 });
+      });
+      mountApp();
+      await flush();
+      $<HTMLInputElement>('analyze-url').value = 'https://vt.tiktok.com/ZS1/';
+      $('analyze-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+
+      const box = $('analyze-error');
+      expect(box.hidden).toBe(false);
+      expect(box.querySelector('.error-message')?.textContent).toBe('This is a TikTok playlist / collection link.');
+      const hint = box.querySelector('.error-hint');
+      expect(hint?.textContent).toContain('playlist / collection');
+      expect(hint?.getAttribute('lang')).toBe('km');
+      expect(hint?.textContent).toMatch(/[\u1780-\u17ff]/); // Khmer script
+      const details = box.querySelector('details');
+      expect(details).not.toBeNull();
+      expect(details!.open).toBe(false);
+      expect(details!.querySelector('summary')?.textContent).toContain('technical details');
+      const lines = details!.querySelector('pre')?.textContent ?? '';
+      expect(lines).toContain('final url: https://www.tiktok.com/@a/collection/Wife-7665668414573546258');
+      expect(lines).toContain('[default headers]: HTTP 302');
+      expect(lines).toContain('page had no embedded video data');
+    });
+
+    it('shows no technical-details box, and no hint, when the failure carries none', async () => {
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('/api/sources')) return jsonResponse(sources);
+        if (url.startsWith('/api/analyze')) return jsonResponse({ error: { code: 'validation_failed', message: 'Invalid request body', details: [{ path: 'url' }] } }, 400);
+        return jsonResponse({ items: [], total: 0 });
+      });
+      mountApp();
+      await flush();
+      $<HTMLInputElement>('analyze-url').value = 'https://example.com/x';
+      $('analyze-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      const box = $('analyze-error');
+      expect(box.textContent).toContain('Invalid request body');
+      expect(box.querySelector('details')).toBeNull();
+      expect(box.querySelector('.error-hint')).toBeNull();
+    });
+
+    it('replaces an earlier error when the next analyze works', async () => {
+      let first = true;
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('/api/sources')) return jsonResponse(sources);
+        if (url.startsWith('/api/analyze')) {
+          if (first) {
+            first = false;
+            return jsonResponse({ error: { code: 'bad_request', message: 'first failure', details: { reason: 'no-public-data', diagnostics: ['step'] } } }, 400);
+          }
+          return jsonResponse({ series, episodes, extractor: 'mock', cached: false });
+        }
+        return jsonResponse({ items: [], total: 0 });
+      });
+      mountApp();
+      await flush();
+      const submit = () => {
+        $<HTMLInputElement>('analyze-url').value = 'https://mock.local/series/1';
+        $('analyze-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      };
+      submit();
+      await flush();
+      expect($('analyze-error').hidden).toBe(false);
+      submit();
+      await flush();
+      expect($('analyze-error').hidden).toBe(true);
+    });
+
+    it('labels a link-only TikTok listing "Unclassified" and warns before anything else', async () => {
+      const note = 'TikTok gave VTGrab no public data for this link (bot check or region block), so only the link itself is listed.';
+      const degraded: SeriesRecord = {
+        ...series,
+        sourceKey: 'tiktok',
+        sourceUrl: 'https://www.tiktok.com/@a/video/7300000000000000012',
+        canonicalUrl: 'tiktok:video:7300000000000000012',
+        title: '@a video 7300000000000000012',
+        episodeCount: 1,
+        metadata: {
+          contentKind: 'unknown',
+          confidence: 'low',
+          degraded: true,
+          signals: ['only the link was available'],
+          listNote: note,
+          diagnostics: ['public page not readable: HTTP 403'],
+        },
+      };
+      const one: EpisodeRecord[] = [
+        {
+          ...episodes[0],
+          id: 'tt_1',
+          episodeIndex: 1,
+          title: '@a video 7300000000000000012',
+          sourceUrl: degraded.sourceUrl,
+          streams: [],
+          metadata: { listOnly: true, platform: 'tiktok', videoId: '7300000000000000012' },
+        },
+      ];
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('/api/sources')) return jsonResponse(sources);
+        if (url.startsWith('/api/analyze')) return jsonResponse({ series: degraded, episodes: one, extractor: 'tiktok', cached: false });
+        return jsonResponse({ items: [], total: 0 });
+      });
+      mountApp();
+      await flush();
+      $<HTMLInputElement>('analyze-url').value = degraded.sourceUrl;
+      $('analyze-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+
+      const result = $('analyze-result');
+      expect(result.textContent?.startsWith(`⚠ ${note}`)).toBe(true);
+      expect(result.classList.contains('analysis-result-warn')).toBe(true);
+      const header = $('series-header').textContent ?? '';
+      expect(header).toContain('Unclassified');
+      expect(header).not.toContain('Normal video');
+      expect(header).toContain('low confidence');
+      expect(header).toContain(note);
+      expect(header).toMatch(/[\u1780-\u17ff]/);
+      expect($('episode-grid').textContent).toContain('VIDEO');
+      // the analyzer's steps are still shown for a degraded result
+      expect($('analyze-diag').hidden).toBe(false);
+      expect($('analyze-diag-text').textContent).toContain('HTTP 403');
+    });
+  });
 });

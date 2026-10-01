@@ -273,18 +273,41 @@ as extractor `tiktok`, ahead of the generic `http-sniff`.
 
 * **Resolve.** A short link is followed hop by hop; every hop must stay on `tiktok.com`
   and pass the normal host policy, so a short link can never steer the Worker elsewhere.
-  Tracking parameters (`_r`, `u_code`, `share_*`, ...) are dropped. TikTok's edge often
-  bot-checks server-side redirect fetches (403, no `Location`); when that happens the
-  hop is recorded in the diagnostics, and if the hop answers 200 with an interstitial
-  the long URL is sniffed out of the page (`og:url`, `rel=canonical`, embed attributes,
-  first absolute video URL).
+  Tracking parameters (`_r`, `u_code`, `share_*`, ...) are dropped. Each hop is asked
+  twice at most, in this order: with **no headers of our own** (platform defaults), then
+  with the configured browser-like headers (`GRAB_USER_AGENT`). Nothing else is ever
+  tried: no cookies, no crawler identity (`facebookexternalhit`, `Discordbot`, ...), no
+  retry loop against a refusal. Only short hops are requested, and the chain stops at the
+  first long URL: `/@user/video/<id>`, `/photo/<id>`, the legacy `/v/<id>.html`, a
+  playlist / collection, a profile, or anything else (it is never fetched and guessed
+  at). `/t/<code>` links are asked on `www.tiktok.com`, not on the `m.` host. If a hop
+  answers 200 with an interstitial, the long URL is sniffed out of the page (`og:url`,
+  `rel=canonical`, `<meta http-equiv=refresh>`, embed attributes, and a bare video URL
+  only when the page names exactly *one* video, so a feed or home page never yields
+  "its first video"). Each attempt is bounded (8 s) and, with its HTTP status, lands in
+  the diagnostics.
 * **Read.** The public HTML's embedded page data (`__UNIVERSAL_DATA_FOR_REHYDRATION__`),
-  then Open Graph tags, then the public `oembed` endpoint if the page is walled. The
-  video id is recovered from whatever names the video — `og:url` / canonical on the
-  page, `data-video-id` / `cite` / anchors inside the oEmbed `html` field — so a short
-  link that never redirected still lists. No login, no cookies, **no attempt to get
-  past a captcha / bot check**: if TikTok returns nothing public, the error says so and
-  suggests pasting the long `www.tiktok.com/@…/video/…` address.
+  then Open Graph tags, then the public `oembed` endpoint (always asked about the
+  canonical `www.tiktok.com/@user/video/<id>` form: it rejects short links) if the page
+  is walled. The video id written in the link is never lost, and a page is only trusted
+  when it is demonstrably about the requested video: TikTok's stock tags ("TikTok - Make
+  Your Day"), a page it redirected the visitor to, and a page whose own data says the
+  video is unavailable (`statusCode`) are not read as the video. No login, no cookies,
+  **no attempt to get past a captcha / bot check**.
+* **When TikTok says no.** The result always says what happened, never a silent guess:
+  * the link names its video (`…/video/<id>`) but page and oEmbed are blocked → that one
+    video is listed with kind **Unclassified**, low confidence, `degraded: true` (no
+    title, episode number or series are invented);
+  * a short link nobody could open → the short link itself is listed as the one post,
+    flagged the same way (the optional SSSTik provider takes a short link as it is);
+  * degraded results are never served from the analyze cache, so a link that works
+    later is analyzed again instead of replaying "nothing could be read";
+  * everything else is an error that names its cause in `error.details.reason`
+    (see *Troubleshooting* below) and carries the step-by-step `details.diagnostics`.
+* **Playlist / collection links** (`/@user/collection/<title>-<id>`, older
+  `/playlist/…`). TikTok hands a playlist's items only to its own app, through a signed
+  API this tool does not use, so these are listed only if the public page itself
+  enumerates the videos. Otherwise the error says so and asks for one episode's link.
 * **Classify.** *mini-drama* when the page labels a series/drama itself, or enough of
   these add up: a specific drama hashtag (`#minidrama`, `#shortmax`, `#reelshort`, ...),
   an episode marker in the caption (`EP 12/60`, `Episode 5`, `Part 3`, `Tập 9`,
@@ -308,6 +331,27 @@ as extractor `tiktok`, ahead of the generic `http-sniff`.
 > TikTok's page layout is not a public contract. The readers are defensive and covered by
 > fixtures, but if a real page stops yielding a playlist the result degrades to the
 > single-episode listing above rather than to wrong data.
+
+### Troubleshooting a TikTok link that will not analyze
+
+Open **technical details** under the error (or the *what the grabber did on this URL*
+box under a result): it is the exact sequence the Worker went through, for example
+`short link vt.tiktok.com/ZS…/ [default headers]: HTTP 403 with no redirect (TikTok bot
+check?)`, then the same for `[browser headers]`. Whether a given link works
+depends on what TikTok answers *your Worker's IP address* at that moment; the test
+suite runs against stubbed TikTok responses and cannot prove that for you.
+
+| `error.details.reason` | Meaning | What to do |
+| --- | --- | --- |
+| `playlist-link` | A playlist / collection link; its page does not list the videos. | Paste the link of any one episode. |
+| `short-link-not-found` | Every request for the short link was HTTP 404/410. | Copy the link again from TikTok. |
+| `unavailable` | TikTok's own page data reports the video as unavailable (its code is in the message) *and* oEmbed could not name the video either: private, removed, or a region / IP block. | Nothing VTGrab can or will bypass. |
+| `no-public-data` | The link ended on a page that is not a video and nothing named the video. | Paste the long `www.tiktok.com/@…/video/…` address. |
+| `no-video-id` | Data was read but it named no video. | Same. |
+| `profile-link` | A profile, not a video. | Paste one episode's link. |
+
+You can paste TikTok's whole share text (`Check out … https://vt.tiktok.com/ZS…/ #fyp`);
+the first `http(s)` link in it is analyzed and shown in the box.
 
 ### Optional third-party SSSTik downloader (whole series; opt-in)
 
@@ -802,6 +846,20 @@ npm run deploy   # build + wrangler deploy
 * ឬឲ្យ script ធ្វើឲ្យ៖ `npx wrangler login` ម្តង រួច `npm run cf:provision`
   (បង្កើតទាំង៣ + សរសេរ database_id ចូល `wrangler.jsonc`) ហើយ
   `npm run db:migrate`។ ពិនិត្យមុន push៖ `npm run cf:check`។
+
+**បើ link TikTok បង្ហាញកំហុស ឬមិនបានលទ្ធផលពេញលេញ៖**
+
+* បើក «technical details · ព័ត៌មានបច្ចេកទេស» ក្រោមសារកំហុស — វាបង្ហាញជំហានដែល Worker
+  បានធ្វើ (បើក short link, អានទំព័រ, oEmbed) និង HTTP status របស់ TikTok។ សូមផ្ញើអត្ថបទនោះ
+  មក បើត្រូវការជំនួយ។
+* **Short link (vt./vm.tiktok.com)** ត្រូវ resolve ជាមុនសិន។ TikTok អាចបដិសេធ server
+  (bot check)។ ក្នុងករណីនោះ VTGrab បង្ហាញ link នោះតែមួយ ហើយប្រាប់ច្បាស់ៗ ថា
+  «Unclassified · មិនទាន់ដឹងប្រភេទ» ជំនួសឱ្យការបរាជ័យ។ បើចង់បានចំណងជើង និងលេខភាគ
+  សូមបើក link ក្នុង browser រួច copy link វែង (`www.tiktok.com/@…/video/…`) មក paste។
+* **Link playlist / collection** (`/@user/collection/…`) — TikTok មិនផ្ញើបញ្ជីភាគទៅ
+  server ទេ (ប្រើ API ដែលមាន signature)។ សូម paste link នៃភាគណាមួយជំនួស។
+* អាច paste អត្ថបទ share ទាំងមូលបាន — VTGrab រើស link ដំបូងដោយខ្លួនឯង។
+* VTGrab មិន login, មិនប្រើ cookie, មិនរំលង bot check / captcha ទេ។
 
 ---
 

@@ -257,7 +257,7 @@ function isEncryptedOnly(episode: EpisodeRecord): boolean {
 function episodeTag(episode: EpisodeRecord, series: SeriesRecord | null): string {
   const number = episode.metadata.episodeNumber;
   if (typeof number === 'number' && Number.isFinite(number)) return `EP ${number}`;
-  if (series?.metadata?.contentKind === 'normal-video') return 'VIDEO';
+  if (series?.metadata?.contentKind === 'normal-video' || series?.metadata?.contentKind === 'unknown') return 'VIDEO';
   return episodeLabel(episode.episodeIndex);
 }
 
@@ -265,12 +265,14 @@ function episodeTag(episode: EpisodeRecord, series: SeriesRecord | null): string
 function renderVerdict(header: HTMLElement): void {
   const meta = state.series?.metadata ?? {};
   const kind = meta.contentKind;
-  if (kind !== 'mini-drama' && kind !== 'normal-video') return;
+  if (kind !== 'mini-drama' && kind !== 'normal-video' && kind !== 'unknown') return;
   const box = el('div', 'verdict');
   box.dataset.kind = String(kind);
   const row = el('div', 'verdict-row');
   row.appendChild(
-    chip(kind === 'mini-drama' ? 'Mini-drama · ភាពយន្តខ្លី' : 'Normal video · វីដេអូធម្មតា', kind === 'mini-drama' ? 'ok' : 'muted'),
+    kind === 'unknown'
+      ? chip('Unclassified · មិនទាន់ដឹងប្រភេទ', 'warn')
+      : chip(kind === 'mini-drama' ? 'Mini-drama · ភាពយន្តខ្លី' : 'Normal video · វីដេអូធម្មតា', kind === 'mini-drama' ? 'ok' : 'muted'),
   );
   if (typeof meta.confidence === 'string') row.appendChild(chip(`${meta.confidence} confidence`, meta.confidence === 'low' ? 'warn' : 'muted'));
   if (kind === 'mini-drama') {
@@ -286,6 +288,15 @@ function renderVerdict(header: HTMLElement): void {
   const signals = Array.isArray(meta.signals) ? (meta.signals as unknown[]).map(String) : [];
   if (signals.length > 0) box.appendChild(el('p', 'muted small', `Why: ${signals.join(' · ')}`));
   if (typeof meta.listNote === 'string' && meta.listNote) box.appendChild(el('p', 'warn-text small', meta.listNote));
+  if (kind === 'unknown') {
+    box.appendChild(
+      el(
+        'p',
+        'warn-text small',
+        'TikTok មិនឱ្យ server អានព័ត៌មានវីដេអូនេះទេ ដូច្នេះបង្ហាញតែ link ប៉ុណ្ណោះ (មិនស្គាល់ចំណងជើង ឬលេខភាគ)។',
+      ),
+    );
+  }
   header.appendChild(box);
 }
 
@@ -335,7 +346,7 @@ function createMediaPlayer(
   return player;
 }
 
-function setAnalysisResult(message: string, warning = false): void {
+function showAnalysisResult(message: string, warning = false): void {
   const result = $('analyze-result');
   result.textContent = message
     ? `${message}\n\nវិភាគគ្រាន់តែរកប្រភពវីដេអូប៉ុណ្ណោះ — មិនមែនមានន័យថាទាញយករួចទេ។`
@@ -830,20 +841,35 @@ function renderFiles(): void {
 // Actions
 // ---------------------------------------------------------------------------
 
+/**
+ * The first http(s) link inside whatever was pasted. TikTok's "Share" text is
+ * `Check out @user's video! https://vt.tiktok.com/ZS…/ #fyp`, not a bare URL, and the
+ * API rightly rejects that as "not a URL".
+ */
+export function extractUrl(pasted: string): string {
+  const text = pasted.trim();
+  if (!text || /^https?:\/\/\S+$/i.test(text)) return text;
+  const found = /https?:\/\/[^\s<>"'`\u201c\u201d\u2018\u2019]+/i.exec(text);
+  // Sentence punctuation right after a link is not part of it.
+  return found ? found[0].replace(/[)\],.;:!?]+$/, '') : text;
+}
+
 async function runAnalyze(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  let url = $<HTMLInputElement>('analyze-url').value.trim();
+  const input = $<HTMLInputElement>('analyze-url');
+  let url = extractUrl(input.value);
   if (url && !/^https?:\/\//i.test(url) && /^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(url)) {
     url = `https://${url}`;
-    $<HTMLInputElement>('analyze-url').value = url;
   }
+  // Show what is actually being analyzed when it differs from what was pasted.
+  if (url && url !== input.value.trim()) input.value = url;
   const sourceKey = $<HTMLSelectElement>('analyze-source').value || undefined;
   const refresh = $<HTMLInputElement>('analyze-refresh').checked;
   const queueAll = $<HTMLInputElement>('analyze-queue').checked;
 
   const errorBox = $('analyze-error');
   errorBox.hidden = true;
-  setAnalysisResult('');
+  showAnalysisResult('');
   if (!url) return;
 
   state.analyzing = true;
@@ -865,6 +891,14 @@ async function runAnalyze(event: SubmitEvent): Promise<void> {
     const foundCount = result.episodes.length;
     const downloadableCount = result.episodes.filter((episode) => !isEncryptedOnly(episode)).length;
     const sourceNote = `via ${result.extractor}${result.cached ? ' (cached result)' : ''}`;
+    // The analyzer could only list the bare link (the host refused it): say so first,
+    // in the warning style, so "Found 1 video" is never mistaken for a full analysis.
+    const degradedNote =
+      result.series.metadata?.degraded === true && typeof result.series.metadata.listNote === 'string'
+        ? result.series.metadata.listNote
+        : '';
+    const setAnalysisResult = (message: string, warning = false): void =>
+      showAnalysisResult(degradedNote ? `⚠ ${degradedNote}\n\n${message}` : message, warning || degradedNote !== '');
     if (result.job) {
       state.details.set(result.job.job.id, result.job);
       state.expanded.add(result.job.job.id);
@@ -912,7 +946,7 @@ async function runAnalyze(event: SubmitEvent): Promise<void> {
       toast('Sources found, but no download job was created.', 'info');
     }
   } catch (error) {
-    setAnalysisResult('');
+    showAnalysisResult('');
     showError(errorBox, error);
   } finally {
     state.analyzing = false;
@@ -920,9 +954,62 @@ async function runAnalyze(event: SubmitEvent): Promise<void> {
   }
 }
 
+/**
+ * Plain-language Khmer explanation per failure `reason` the TikTok analyzer reports
+ * (`details.reason`), shown under the English message.
+ */
+const FAILURE_HINTS_KM: Record<string, string> = {
+  'playlist-link':
+    'នេះជា link playlist / collection។ TikTok មិនផ្ញើបញ្ជីភាគទៅ server បានទេ។ សូមបើកភាគណាមួយក្នុង TikTok រួច copy link នៃភាគនោះមក paste វិញ។',
+  'short-link-not-found':
+    'TikTok ថា short link នេះមិនមានទេ។ ប្រហែលជាវាខុស ឬផុតកំណត់ ឬត្រូវបានលុប។ សូម copy link ម្តងទៀតពី TikTok។',
+  unavailable:
+    'TikTok ថាវីដេអូនេះមើលមិនបាន (private, ត្រូវបានលុប ឬត្រូវបានទប់ស្កាត់ដោយតំបន់ / IP)។ VTGrab មិន login ឬរំលង bot check ទេ។',
+  'no-public-data':
+    'TikTok មិនឱ្យ server អានទំព័រនេះទេ (bot check)។ សូមបើក link ក្នុង browser រួច copy link វែង (www.tiktok.com/@…/video/…) មក paste។',
+  'no-video-id':
+    'TikTok មិនបានប្រាប់ថា link នេះជាវីដេអូមួយណាទេ។ សូមបើក link ក្នុង browser រួច copy link វែងមក paste។',
+  'profile-link': 'នេះជា link គណនី (profile) មិនមែនវីដេអូទេ។ សូម paste link នៃភាគណាមួយ។',
+};
+
+interface FailureDetails {
+  reason?: string;
+  resolvedUrl?: string;
+  diagnostics: string[];
+}
+
+/** What the API attached to a failed request (`error.details`), tolerant of any shape. */
+function readFailureDetails(error: unknown): FailureDetails {
+  const raw = error instanceof ApiError ? error.details : undefined;
+  const record = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  return {
+    reason: typeof record.reason === 'string' ? record.reason : undefined,
+    resolvedUrl: typeof record.resolvedUrl === 'string' ? record.resolvedUrl : undefined,
+    diagnostics: Array.isArray(record.diagnostics) ? record.diagnostics.map((line) => String(line)) : [],
+  };
+}
+
 function showError(node: HTMLElement, error: unknown): void {
   const message = error instanceof ApiError ? error.message : (error as Error).message;
-  node.textContent = message;
+  const details = readFailureDetails(error);
+  clear(node);
+  node.appendChild(el('p', 'error-message', message));
+  const hint = details.reason ? FAILURE_HINTS_KM[details.reason] : undefined;
+  if (hint) {
+    const note = el('p', 'error-hint', hint);
+    note.lang = 'km';
+    node.appendChild(note);
+  }
+  // What the analyzer actually did, step by step: the one thing that tells a blocked
+  // request from a bad link, and what to paste into a bug report.
+  if (details.diagnostics.length > 0) {
+    const box = el('details', 'diag error-diag');
+    box.appendChild(el('summary', undefined, 'technical details · ព័ត៌មានបច្ចេកទេស'));
+    const lines = [...details.diagnostics];
+    if (details.resolvedUrl) lines.unshift(`final url: ${details.resolvedUrl}`);
+    box.appendChild(el('pre', undefined, lines.join('\n')));
+    node.appendChild(box);
+  }
   node.hidden = false;
   toast(message, 'error');
 }
@@ -970,7 +1057,7 @@ async function runCreateJob(mode: 'ids' | 'all'): Promise<void> {
     state.details.set(detail.job.id, detail);
     state.expanded.add(detail.job.id);
     status.textContent = `job ${detail.job.id} queued (${detail.items.length} items) — waiting for download`;
-    setAnalysisResult(
+    showAnalysisResult(
       `Download queued as job ${detail.job.id} (${detail.items.length} item(s)); this is not a saved video yet. Watch Jobs below. Files appear here after the items complete.`,
     );
     toast(`Queued ${detail.items.length} item(s); download is not complete yet.`, 'info');
