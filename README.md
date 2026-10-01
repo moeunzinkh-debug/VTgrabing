@@ -334,9 +334,16 @@ To enable it on a deployment, set the non-secret Worker variables:
 
 ```text
 TIKTOK_SSTIK_ENABLED=true
-TIKTOK_SSTIK_MIN_INTERVAL_MS=1500    # spacing between SSSTik requests in one isolate
-TIKTOK_SSTIK_COOLDOWN_SECONDS=12     # wait before retrying a rate-limited post
+TIKTOK_SSTIK_MIN_INTERVAL_MS=1500    # spacing between SSSTik requests in one isolate; 0 = no pacing
+TIKTOK_SSTIK_COOLDOWN_SECONDS=12     # wait before retrying a rate-limited post; 0 = retry immediately
 ```
+
+For these two, `0` is a real setting and is honoured as such — unlike most numeric
+vars in this project, where `0` is read as "not configured" and the default applies
+(`num()` in `src/env.ts` takes an explicit `minimum` for exactly this reason). A
+negative or unparseable value still falls back to the default, and both are clamped
+(30000 ms, 120 s). `wrangler.test.jsonc` sets both to `0` so the suite never really
+sleeps; the paced behaviour is asserted directly in `test/tiktok-ssstik.test.ts`.
 
 It is off by default and is never the default download provider.
 

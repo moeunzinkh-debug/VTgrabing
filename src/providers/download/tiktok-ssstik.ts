@@ -60,7 +60,9 @@ function enabled(env: Env): boolean {
  * Set `TIKTOK_SSTIK_MIN_INTERVAL_MS=0` to disable.
  */
 function minIntervalMs(env: Env): number {
-  return Math.max(0, Math.min(30_000, num(env, 'TIKTOK_SSTIK_MIN_INTERVAL_MS', 1_500)));
+  // `0` is a real setting here (pacer off), so `num` must accept it rather than
+  // treating it as "unset" and silently applying the default.
+  return Math.max(0, Math.min(30_000, num(env, 'TIKTOK_SSTIK_MIN_INTERVAL_MS', 1_500, 0)));
 }
 
 /**
@@ -69,7 +71,7 @@ function minIntervalMs(env: Env): number {
  * makes the retry immediate (used by the test suite).
  */
 function cooldownSeconds(env: Env): number {
-  return Math.max(0, Math.min(120, num(env, 'TIKTOK_SSTIK_COOLDOWN_SECONDS', RATE_LIMIT_COOLDOWN_SECONDS)));
+  return Math.max(0, Math.min(120, num(env, 'TIKTOK_SSTIK_COOLDOWN_SECONDS', RATE_LIMIT_COOLDOWN_SECONDS, 0)));
 }
 
 function sleep(ms: number): Promise<void> {

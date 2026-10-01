@@ -328,13 +328,23 @@ Status: **items 1–6 and 8 are implemented**; item 7 stays deliberately out of 
 | 7 | HD tier is a separate RapidAPI upstream gated behind ad-block detection | ⛔ Out of scope on purpose | Requires their ad/HD flow. Our MP4 path already verifies `ftyp`; chasing "HD" would mean driving their interstitials. |
 | 8 | Signed CDN URLs carry `refresh_token`/`nonce`/`t` and expire | ✅ Already correct | `cf: { cacheTtl: 0 }`, streamed straight into R2, URL never persisted. |
 
-Two bugs were found and fixed while implementing the above, both of which a
+Three bugs were found and fixed while implementing the above, all of which a
 last-segment-only or truthiness-based reading would have shipped:
 
 * **Multi-segment base64** (1b) — the wrapper path splits the payload, so decoding
   only the final segment returns `null` and the episode fails as "no MP4 link found".
 * **Falsy-zero retry** — `if (mapped?.retryAfterSeconds)` skips the retry entirely when
   the cooldown is configured to `0`. Now `typeof … === 'number'`.
+* **Zero never reached the config reader** — `num(env, key, fallback)` only accepted
+  `parsed > 0`, so `TIKTOK_SSTIK_COOLDOWN_SECONDS=0` and `TIKTOK_SSTIK_MIN_INTERVAL_MS=0`
+  were silently discarded and the defaults applied. Fixing the retry gate alone would
+  still have left `0` meaningless, and the test suite (which sets both to `0` in
+  `wrangler.test.jsonc`) would have really slept 1.5 s per request and 12 s per retry.
+  `num()` now takes an explicit `minimum` that defaults to `1`, keeping `0` = "not
+  configured" for every var that would break on a zero (`MAX_ATTEMPTS`,
+  `QUEUE_PUSH_BATCH_SIZE`, `GRAB_MAX_REDIRECTS`, `STALE_ITEM_MINUTES`) and letting only
+  the two settings where zero is meaningful opt in. Verified inert for all 17
+  pre-existing keys.
 
 **Things we should deliberately NOT copy:**
 

@@ -53,7 +53,12 @@
     // grabber (network I/O) is covered in test/grab.test.ts with a stubbed fetch.
     "GRAB_ENABLED": "false",
     "TIKTOK_SSTIK_ENABLED": "false",
-    // Keep the suite fast: the pacer is asserted directly in tiktok-ssstik.test.ts.
-    "TIKTOK_SSTIK_MIN_INTERVAL_MS": "0"
+    // Keep the suite fast: both pacer settings default to 0 here. An explicit 0
+    // is a real configuration for these two (see `num()` in src/env.ts), and the
+    // non-zero behaviour is asserted directly in tiktok-ssstik.test.ts. Without
+    // this, a rate-limit test would really sleep 12 s and every post would be
+    // paced 1.5 s apart.
+    "TIKTOK_SSTIK_MIN_INTERVAL_MS": "0",
+    "TIKTOK_SSTIK_COOLDOWN_SECONDS": "0"
   }
 }
