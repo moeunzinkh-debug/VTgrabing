@@ -24,7 +24,7 @@
     "verify:grab": "node scripts/verify-grab-e2e.mjs",
     "probe:ssstik": "node scripts/probe-ssstik.mjs",
     "download:ssstik": "node scripts/probe-ssstik.mjs --download",
-    "test:probe:ssstik": "node --test scripts/probe-ssstik.test.mjs scripts/ssstik-download.test.mjs",
+    "test:probe:ssstik": "node --test scripts/lib/ssstik-media.test.mjs scripts/probe-ssstik.test.mjs scripts/ssstik-download.test.mjs",
     "cf:provision": "node scripts/provision-cloudflare.mjs",
     "db:create": "wrangler d1 create vtgrab-db",
     "db:migrate:local": "wrangler d1 migrations apply vtgrab-db-test --local --config wrangler.test.jsonc",

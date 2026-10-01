@@ -48,6 +48,14 @@ export interface Env {
   GRAB_ENABLED?: string;
   /** Explicit opt-in for the unofficial SSSTik single-video TikTok provider. */
   TIKTOK_SSTIK_ENABLED?: string;
+  /**
+   * Minimum spacing (ms) between two SSSTik requests from one isolate. Their
+   * backend rate-limits per IP, so a whole-series job has to pace itself.
+   * `0` disables the pacer (tests).
+   */
+  TIKTOK_SSTIK_MIN_INTERVAL_MS?: string;
+  /** Wait before retrying a post SSSTik rate-limited (`ssslimitexceed`). */
+  TIKTOK_SSTIK_COOLDOWN_SECONDS?: string;
   /** Optional allow-list of hosts the grabber may open (empty = any public host). */
   GRAB_ALLOWED_HOSTS?: string;
   /** Hosts the grabber must never open, even if the allow-list accepts them. */
@@ -98,10 +106,24 @@ export function mocksEnabled(env: Env): boolean {
   return !isProduction(env);
 }
 
-export function num(env: Env, key: keyof Env, fallback: number): number {
+/**
+ * Read an integer var, falling back when it is absent or not a number.
+ *
+ * `minimum` is the smallest value an operator may actually set. It defaults to 1
+ * — i.e. `0` keeps meaning "not configured" — because several vars are not
+ * clamped from below at their call site and would be broken by a stray zero
+ * (`MAX_ATTEMPTS`, `QUEUE_PUSH_BATCH_SIZE`, `GRAB_MAX_REDIRECTS`,
+ * `STALE_ITEM_MINUTES`). Only a setting for which zero is itself meaningful asks
+ * for `minimum: 0`, e.g. `TIKTOK_SSTIK_MIN_INTERVAL_MS=0` turns the pacer off and
+ * `TIKTOK_SSTIK_COOLDOWN_SECONDS=0` makes the retry immediate. Without that
+ * opt-in the documented value is silently discarded and the default applies.
+ *
+ * Negative values always fall back: clamping is the caller's job.
+ */
+export function num(env: Env, key: keyof Env, fallback: number, minimum = 1): number {
   const raw = env[key];
   const parsed = typeof raw === 'string' ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
 }
 
 export function maxAttempts(env: Env): number {

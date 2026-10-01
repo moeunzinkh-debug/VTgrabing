@@ -31,6 +31,12 @@ GRAB_CHUNK_BYTES=8388608
 # the TikTok URL is sent to SSSTik and you have the right to save the video.
 # It never logs in, solves captchas, or bypasses DRM; enable only after local review.
 TIKTOK_SSTIK_ENABLED=false
+# Minimum spacing between two SSSTik requests (ms). Their backend rate-limits per
+# IP (~10 s), and every episode needs a fresh single-use token, so series jobs are
+# pinned to concurrency 1 regardless of DEFAULT_CONCURRENCY.
+TIKTOK_SSTIK_MIN_INTERVAL_MS=1500
+# Wait before the single in-provider retry of a rate-limited post (ssslimitexceed).
+TIKTOK_SSTIK_COOLDOWN_SECONDS=12
 
 # Authorized source (extractor) - leave empty to use the real link grabber.
 SOURCE_API_BASE_URL=

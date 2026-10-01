@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A force-push to a PR branch should not leave a stale run reporting on the old commit.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # package-lock.json is committed, so CI installs exactly what was developed
+      # against and fails if a dependency was added without updating the lockfile.
+      - name: Install
+        run: npm ci
+
+      # All three tsconfig projects: worker + tests, the Vite client, and the
+      # DOM test harness. Strict mode with noUnusedLocals/noUnusedParameters, so
+      # this is the step that catches a dead import as well as a type error.
+      - name: Typecheck
+        run: npm run typecheck
+
+      # vitest runs inside workerd via @cloudflare/vitest-pool-workers against
+      # wrangler.test.jsonc (D1 + R2 + Queues emulated), then the DOM suite.
+      - name: Test
+        run: npm test
+
+      # The SSSTik CLI scripts are plain ESM and mirror src/providers/download/
+      # ssstik-media.ts for the terminal. They need no network and no registry
+      # beyond the install above, so they run in CI too: a drift between the
+      # worker module and its CLI mirror is otherwise invisible until someone
+      # runs `npm run probe:ssstik` by hand.
+      - name: Test CLI scripts
+        run: npm run test:probe:ssstik --if-present
+
+      # `npm run build` is typecheck + vite build + `wrangler deploy --dry-run`,
+      # i.e. the same command the Cloudflare Workers Build integration runs, so a
+      # green build here is what makes that integration green. --dry-run bundles
+      # into .wrangler/build-check (git-ignored) and uploads nothing, so no
+      # Cloudflare credentials are required.
+      - name: Build
+        run: npm run build
+
+      # The deploy config has its own invariants (assets dir present, no var that
+      # should be a secret, queue/D1/R2 bindings wired). It is also the predeploy
+      # hook, so run it explicitly to make a failure here obvious rather than
+      # surfacing as an unexplained build error.
+      - name: Verify deploy config
+        run: npm run cf:check

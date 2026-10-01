@@ -5,20 +5,19 @@ import { join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
-// Media URLs in old public SSSTik examples are sometimes redirects/wrappers.
-// Do not fetch an arbitrary address returned in third-party HTML (SSRF).
-const MEDIA_HOSTS = [
-  'ssstik.io', 'ssscdn.io', 'tiktok.com', 'tiktokcdn.com', 'tiktokcdn-us.com',
-  'bytecdn.com', 'muscdn.com', 'ibytedtos.com', 'byteoversea.com',
-];
+import { isAllowedMediaHost, unwrapMediaUrl } from './lib/ssstik-media.mjs';
+
+// SSSTik hands out either a redirecting proxy URL or one whose real target is
+// base64-encoded into the path, so unwrap first and validate *the decoded* host.
+// Never fetch an arbitrary address that appeared in third-party HTML (SSRF).
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
 
 export function allowedMediaUrl(raw) {
-  const url = new URL(raw);
+  const { url: unwrapped, decoded } = unwrapMediaUrl(raw);
+  const url = new URL(unwrapped);
   const host = url.hostname.toLowerCase();
-  if (url.protocol !== 'https:' || url.username || url.password || url.port ||
-    !MEDIA_HOSTS.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) {
-    throw new Error(`Media host is not on the probe allow-list: ${host}`);
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !isAllowedMediaHost(host)) {
+    throw new Error(`Media host is not on the probe allow-list: ${host}${decoded ? ' (decoded from an SSSTik wrapper)' : ''}`);
   }
   return url;
 }
