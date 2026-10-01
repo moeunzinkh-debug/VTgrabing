@@ -174,6 +174,14 @@ describe('TikTokSsstikDownloadProvider - wrapped links, signals and pacing', () 
     'https://p16-amd-va.tiktokcdn.com/tos-maliva-v-0068/' +
     'o0Ek9ZBpLIAz1x2vQcFwPbSdHqYtRr4hM4yLz7Cv1aEe6~tplv-tiktokx-origin.image?dr=14579&x-expires=1790000000';
 
+  /**
+   * Every media URL this stub will serve. It has to include the plain
+   * `video.mp4` that the shared `RESULTS` fragment references, not just the two
+   * wrapped-link fixtures, or a test that passes `RESULTS` (the pacing tests)
+   * reaches the media hop and gets a 404 from the fallback below.
+   */
+  const SERVED_MEDIA = ['https://v16.tiktokcdn.com/video.mp4', REAL_MP4, REAL_MP4_MULTI];
+
   function stubSsstik(fragment: string, fragmentHeaders: Record<string, string> = {}) {
     const calls: string[] = [];
     vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
@@ -185,7 +193,7 @@ describe('TikTokSsstikDownloadProvider - wrapped links, signals and pacing', () 
       if (url === 'https://ssstik.io/abc?url=dl') {
         return response(fragment, { 'content-type': 'text/html', ...fragmentHeaders });
       }
-      if (url === REAL_MP4 || url === REAL_MP4_MULTI) {
+      if (SERVED_MEDIA.includes(url)) {
         return response(MP4, { 'content-type': 'video/mp4', 'content-length': String(MP4.byteLength) });
       }
       return new Response('unexpected ' + url, { status: 404 });
@@ -367,8 +375,12 @@ describe('TikTokSsstikDownloadProvider - wrapped links, signals and pacing', () 
     const startedAt = Date.now();
     const result = await new TikTokSsstikDownloadProvider().start(request(), env);
     expect(result.kind).toBe('stream');
-    // shell -> form -> media means at least two enforced gaps of 120 ms.
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(240);
+    // The two SSSTik requests (shell GET, then form POST) are one paced gap
+    // apart: the first request never waits (nothing preceded it), the second
+    // waits out the ~120 ms interval. The media fetch is not paced -- it goes to
+    // TikTok's CDN, which does not rate-limit us the way SSSTik's form does --
+    // so this asserts one gap, not two.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(110);
   });
 
   it('does not pace at all when the interval is zero', async () => {
