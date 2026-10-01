@@ -52,6 +52,8 @@
     // The automated suite drives the deterministic mock pipeline; the real
     // grabber (network I/O) is covered in test/grab.test.ts with a stubbed fetch.
     "GRAB_ENABLED": "false",
-    "TIKTOK_SSTIK_ENABLED": "false"
+    "TIKTOK_SSTIK_ENABLED": "false",
+    // Keep the suite fast: the pacer is asserted directly in tiktok-ssstik.test.ts.
+    "TIKTOK_SSTIK_MIN_INTERVAL_MS": "0"
   }
 }

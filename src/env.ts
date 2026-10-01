@@ -48,6 +48,14 @@ export interface Env {
   GRAB_ENABLED?: string;
   /** Explicit opt-in for the unofficial SSSTik single-video TikTok provider. */
   TIKTOK_SSTIK_ENABLED?: string;
+  /**
+   * Minimum spacing (ms) between two SSSTik requests from one isolate. Their
+   * backend rate-limits per IP, so a whole-series job has to pace itself.
+   * `0` disables the pacer (tests).
+   */
+  TIKTOK_SSTIK_MIN_INTERVAL_MS?: string;
+  /** Wait before retrying a post SSSTik rate-limited (`ssslimitexceed`). */
+  TIKTOK_SSTIK_COOLDOWN_SECONDS?: string;
   /** Optional allow-list of hosts the grabber may open (empty = any public host). */
   GRAB_ALLOWED_HOSTS?: string;
   /** Hosts the grabber must never open, even if the allow-list accepts them. */

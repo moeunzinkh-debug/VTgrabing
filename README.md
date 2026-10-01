@@ -298,57 +298,137 @@ as extractor `tiktok`, ahead of the generic `http-sniff`.
   extractor then takes over these links (registry position 1).
 * **Official listing vs. optional download.** TikTok episodes carry no direct streams and
   are marked `listOnly`; the official/public-page analyzer alone never downloads them.
-  An optional, explicitly enabled `tiktok-ssstik` job provider can try one public TikTok
-  video post at a time through SSSTik. If a public playlist exposes several episode
-  URLs, each selected episode becomes a separate job item and is sent separately.
+  An optional, explicitly enabled `tiktok-ssstik` job provider can download those listed
+  episodes through SSSTik. If a public playlist exposes several episode URLs, each
+  selected episode becomes a separate job item and is sent separately — the whole series
+  is walked one post at a time, pinned to `concurrency: 1` because SSSTik rate-limits
+  per IP. See
+  [the SSSTik section](#optional-third-party-ssstik-downloader-whole-series-opt-in).
 
 > TikTok's page layout is not a public contract. The readers are defensive and covered by
 > fixtures, but if a real page stops yielding a playlist the result degrades to the
 > single-episode listing above rather than to wrong data.
 
-### Optional third-party SSSTik downloader (one post; opt-in)
+### Optional third-party SSSTik downloader (whole series; opt-in)
 
-The app includes an unofficial adapter for the public SSSTik form flow described by
-[third-party clients from 2023](https://github.com/krypton-byte/tiktok-downloader/blob/master/tiktok_downloader/ssstik.py)
-and [2024](https://github.com/ibnusyawall/ssstik.io-scrapper/blob/main/index.js):
-`GET https://ssstik.io/` → read the public `s_tt` / `tt` token → `POST
-https://ssstik.io/abc?url=dl` → fetch one returned MP4. This is **not a TikTok API,
-not an official SSSTik API, and not a stable contract**. SSSTik may change, reject,
-rate-limit, or block requests at any time.
+The app includes an unofficial adapter for the public SSSTik form flow, reverse-engineered
+from SSSTik's own published client-side bundle and cross-checked against third-party clients
+from [2023](https://github.com/krypton-byte/tiktok-downloader/blob/master/tiktok_downloader/ssstik.py)
+and [2024](https://github.com/ibnusyawall/ssstik.io-scrapper/blob/main/index.js). The full
+teardown — request contract, the 19 backend signals, the CDN wrapping scheme and the
+monetisation layer — is in [`docs/research/ssstik-frontend-analysis.md`](docs/research/ssstik-frontend-analysis.md).
 
-To enable it on a deployment, set the non-secret Worker variable:
+Per episode:
+
+```text
+GET  https://ssstik.io/            -> read the single-use `s_tt` / `tt` page token
+POST https://ssstik.io/abc?url=dl  -> id=<post url>&locale=en&tt=<token>   (HTMX form post)
+     <- an HTML fragment + an `HX-Trigger` verdict, not JSON
+     -> unwrap the media link, then stream one verified MP4 into R2
+```
+
+This is **not a TikTok API, not an official SSSTik API, and not a stable contract**.
+SSSTik may change, reject, rate-limit, or block requests at any time.
+
+To enable it on a deployment, set the non-secret Worker variables:
 
 ```text
 TIKTOK_SSTIK_ENABLED=true
+TIKTOK_SSTIK_MIN_INTERVAL_MS=1500    # spacing between SSSTik requests in one isolate
+TIKTOK_SSTIK_COOLDOWN_SECONDS=12     # wait before retrying a rate-limited post
 ```
 
-It is off by default and is never the default download provider. After analyzing a
-TikTok link, explicitly choose **TikTok via SSSTik**, tick the rights/URL-sharing
-confirmation, then start the job. The provider accepts one public long-form
-`www.tiktok.com/@…/video/<id>` post URL per item; it does not resolve short links,
-profiles, playlists, or infer other episodes itself. TikTok URLs have already been
-resolved by the analyzer. The link (without tracking query parameters) is sent to
-SSSTik, which is a third party. Its short-lived first-party cookie is used only for
-its form request; VTGrab sends no TikTok account/session credentials. It does not
-solve captchas, bypass logins, or decrypt DRM. The result must be from the code's
-small SSSTik/TikTok media-host allow-list, have an MP4 `ftyp` signature, and fit
-within the 256 MiB limit before it is streamed into R2 through the normal job path.
+It is off by default and is never the default download provider.
 
-If `GRAB_ALLOWED_HOSTS` is set, include the relevant hosts (at minimum `tiktok.com`,
-`ssstik.io`, `ssscdn.io`, `tiktokcdn.com`, `tiktokcdn-us.com`, `bytecdn.com`,
-`muscdn.com`, `ibytedtos.com`, and `byteoversea.com`) or the host policy will refuse
-the request. Keep `GRAB_DENIED_HOSTS` in force as usual.
+#### Downloading every episode of a series
 
-Use this only for videos you own or are authorized to save, and follow TikTok's,
-SSSTik's, and your local rules. The checkbox is a user attestation, not a rights
-verification mechanism. Offline fixture tests cover form parsing, URL/media-host
-checks, redirects, and MP4 validation, but they do **not** prove that SSSTik currently
-works. The sandbox's HTTPS connection to SSSTik closes during TLS handshake, so live
-end-to-end downloading remains **unverified**. The standalone probe remains available
-for diagnostics:
+Analyze the series/playlist link first so the TikTok analyzer lists every episode, then
+choose **TikTok via SSSTik**, tick the rights/URL-sharing confirmation, and start the job.
+Each listed episode becomes its own job item and is sent to SSSTik separately.
+
+Such a job is **pinned to `concurrency: 1`** regardless of `DEFAULT_CONCURRENCY`: SSSTik
+rate-limits per IP (it answers `ssslimitexceed` and asks for ~10 seconds between posts) and
+every episode needs a *fresh* single-use token, so parallel items would only collect
+rate-limit errors and burn their retry budget. Items still retry through the queue with
+backoff, and a rate-limited post is retried once inside the provider after the cooldown.
+
+#### What the provider accepts
+
+One public TikTok **post** per item: `www.tiktok.com/@…/video/<id>`, a `/@…/photo/<id>`
+carousel post, a legacy `/v|/embed|/player/v1/<id>` URL, or a TikTok short link
+(`vm.` / `vt.` / `/t/` / `/v/`) which SSSTik resolves itself. Post URLs are normalised to
+one stable spelling and tracking parameters are stripped before anything leaves the Worker.
+Profiles and playlists are rejected — analyze them instead so VTGrab can list the episodes.
+The provider never infers additional episodes on its own.
+
+The link is sent to SSSTik, which is a third party. Its short-lived first-party cookie is
+used only for its form request; VTGrab sends no TikTok account/session credentials. It does
+not solve captchas, bypass logins, work around a bot challenge, or decrypt DRM — on a
+challenge or an unexpected format it stops and says so.
+
+#### Unwrapping the media link
+
+SSSTik does not hand out raw TikTok CDN URLs. It re-wraps them behind its own hosts, and
+often encodes the real signed URL **base64 into the path** instead of redirecting:
+
+```text
+https://ssscdn.io/<locale>/<product>/<base64 of the real URL>
+https://tikcdn.io/<product>/a/<base64 of the real URL>
+```
+
+Because `/` is part of the base64 alphabet, a long signed URL is split across *several*
+path segments (`[2, 6, 171, 76]` for a typical avatar URL), so the segments have to be
+rejoined before decoding — scanning only the last segment silently finds nothing for
+exactly the long signed URLs that matter. Both forms are handled: path-embedded payloads
+are decoded, opaque proxy paths (`/dl/<id>`) are fetched and their redirects followed.
+The decoded URL is then put through the same host allow-list and SSRF guard as any other
+URL, on every hop.
+
+#### Diagnosing a failed episode
+
+The backend reports what happened through `HX-Trigger`, so failures are specific rather
+than a generic "no link found":
+
+| Verdict | Meaning |
+|---|---|
+| `ssssuccess_wmonly` | only the watermarked version exists; not stored |
+| `ssssuccess_slides` | the post is a photo carousel; there is no single MP4 |
+| `ssssuccess_music` | audio only; reported as such rather than fetched as an MP4 |
+| `sssinvalidlink` | SSSTik did not recognise the link |
+| `ssstterror` | the post is private, removed or region-blocked |
+| `ssscurlerror` | SSSTik's own fetch of TikTok failed (transient) |
+| `sssblockedclient` | this client/IP is blocked; check the deployment egress IP |
+| `ssstokenfail` | the page token was rejected (retried once with a fresh token) |
+| `ssslimitexceed` | rate-limited (retried once after the cooldown) |
+
+SSSTik's `sssrapidapi*` signals belong to its separate paid HD tier, which VTGrab does not
+use; they are deliberately never reported as the reason an episode failed.
+
+The result must be from the media-host allow-list (`ssstik.io`, `ssscdn.io`, `tikcdn.io`,
+`tiktok.com` and the regional TikTok/ByteDance CDNs — see `ALLOWED_MEDIA_HOSTS` in
+`src/providers/download/ssstik-media.ts`), carry an MP4 `ftyp` signature, and fit within
+the 256 MiB limit before it is streamed into R2 through the normal job path.
+
+If `GRAB_ALLOWED_HOSTS` is set, include those hosts (at minimum `tiktok.com`, `ssstik.io`,
+`ssscdn.io`, `tikcdn.io`, `tiktokcdn.com`, `tiktokcdn-us.com`, `tiktokcdn-eu.com`,
+`bytecdn.com`, `muscdn.com`, `ibytedtos.com`, and `byteoversea.com`) or the host policy
+will refuse the request. Keep `GRAB_DENIED_HOSTS` in force as usual.
+
+Use this only for videos you own or are authorized to save, and follow TikTok's, SSSTik's,
+and your local rules. The checkbox is a user attestation, not a rights verification
+mechanism. Downloading a whole series means sending every episode URL to a third party and
+pulling one signed CDN object per episode: check that is permitted before you start.
+
+Offline tests cover token extraction, URL validation and normalisation, base64 unwrapping
+(single- and multi-segment), host allow-listing, redirect guarding, signal-to-message
+mapping, the rate-limit retry, pacing, and MP4 signature/length validation — but they do
+**not** prove that SSSTik currently works. This sandbox's HTTPS connection to SSSTik closes
+during the TLS handshake (Cloudflare rejects it), so live end-to-end downloading remains
+**unverified**. The standalone probe is available for diagnostics from a machine that can
+reach the site:
 
 ```bash
-npm run probe:ssstik -- 'https://www.tiktok.com/@account/video/1234567890123456789'     # print result links only
+npm run probe:ssstik -- 'https://www.tiktok.com/@account/video/1234567890123456789'     # print unwrapped result links only
 npm run download:ssstik -- 'https://www.tiktok.com/@account/video/1234567890123456789'  # save ONE MP4 under downloads/
 npm run test:probe:ssstik  # offline CLI fixture tests; no remote calls
 ```

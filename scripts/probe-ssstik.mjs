@@ -9,6 +9,7 @@
  *        npm run download:ssstik -- 'https://www.tiktok.com/@user/video/1234567890123456789'
  */
 import { pathToFileURL } from 'node:url';
+import { unwrapMediaUrl } from './lib/ssstik-media.mjs';
 import { downloadOneVideo } from './ssstik-download.mjs';
 
 const ORIGIN = 'https://ssstik.io';
@@ -72,7 +73,10 @@ export function parseResults(html) {
     if (!kind || !attrs.href) continue;
     let target;
     try {
-      target = new URL(attrs.href, ORIGIN);
+      // SSSTik's CDN hosts may base64-encode the real target into the path
+      // instead of redirecting; print what the link actually points at.
+      const absolute = new URL(attrs.href, ORIGIN).href;
+      target = new URL(unwrapMediaUrl(absolute).url);
     } catch {
       continue;
     }

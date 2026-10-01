@@ -43,13 +43,19 @@ function notFileReason(episode: EpisodeRecord, providerKey?: string): 'encrypted
 import type { CreateJobInput, JobOptionsInput } from '../core/validate';
 
 export function buildJobOptions(env: Env, input: JobOptionsInput = {}): JobOptions {
+  const provider = input.provider?.trim();
   const options: JobOptions = {
     quality: input.quality ?? env.DEFAULT_QUALITY ?? '1080p',
     container: (input.container ?? env.DEFAULT_CONTAINER ?? 'mp4').toLowerCase(),
     concurrency: input.concurrency ?? defaultConcurrency(env),
     prefix: (input.prefix ?? 'vtgrab').replace(/^\/+|\/+$/g, '') || 'vtgrab',
   };
-  if (input.provider) options.provider = input.provider;
+  if (provider) options.provider = provider;
+  // The unofficial SSSTik form is rate-limited per IP (it answers `ssslimitexceed`
+  // and asks for ~10 s between posts), and every episode needs a *fresh* single-use
+  // shell token. Walking a whole series therefore has to be serial: parallel items
+  // would only collect rate-limit errors and burn their retry budget.
+  if (options.provider === 'tiktok-ssstik') options.concurrency = 1;
   return options;
 }
 
