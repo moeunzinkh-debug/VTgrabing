@@ -59,6 +59,24 @@ const BASE64_SEGMENT = /^[A-Za-z0-9+/]+={0,2}$/;
 const MIN_DECODE_SEGMENT = 20;
 
 /**
+ * Options for the strict UTF-8 decoder used below.
+ *
+ * `fatal: true` is what makes a binary-but-valid-base64 payload (a thumbnail
+ * hash, an opaque id) return `null` instead of decoding to U+FFFD and failing
+ * later as "not a URL" — the honest answer is "this segment was never text".
+ *
+ * `@cloudflare/workers-types` declares the constructor's options without a
+ * `fatal` member, while workerd implements the Encoding standard, which does
+ * have one. The cast is therefore about the type declaration only and changes no
+ * runtime behaviour. The target type is derived from the constructor itself
+ * (`ConstructorParameters`, not `Parameters` — `TextDecoder` has no call
+ * signature) rather than naming workers-types' option type, so this keeps
+ * compiling if that declaration is ever renamed or gains `fatal`.
+ */
+type StrictDecoderOptions = ConstructorParameters<typeof TextDecoder>[1];
+const fatalTextDecoderOptions = { fatal: true } as unknown as StrictDecoderOptions;
+
+/**
  * TikTok's alternate short-link domain.
  *
  * SSSTik's own client-side `keyup` validator accepts it alongside `tiktok.com`
@@ -107,7 +125,7 @@ export function decodeBase64UrlSegment(segment: string): string | null {
 
   let text: string;
   try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    text = new TextDecoder('utf-8', fatalTextDecoderOptions).decode(bytes);
   } catch {
     return null; // binary segment (a thumbnail hash, an id), not a URL
   }

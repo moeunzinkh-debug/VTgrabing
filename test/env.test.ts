@@ -19,7 +19,10 @@ describe('num', () => {
   function envWithout(key: keyof Env): Env {
     const copy: Record<string, unknown> = { ...testEnv };
     delete copy[String(key)];
-    return copy as Env;
+    // Through `unknown`: `Record<string, unknown>` and `Env` do not overlap enough
+    // for a direct assertion, since Env's bindings (DB, FILES, JOB_QUEUE) are
+    // object types a string-index signature says nothing about.
+    return copy as unknown as Env;
   }
 
   it('falls back when the var is absent or not an integer', () => {
